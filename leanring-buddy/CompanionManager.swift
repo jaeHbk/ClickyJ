@@ -23,6 +23,36 @@ enum CompanionVoiceState {
 
 @MainActor
 final class CompanionManager: ObservableObject {
+
+    // MARK: - Region Visualization Value Types
+
+    /// A single annotation Claude returned for a selected region, already mapped
+    /// from crop-pixel space to an AppKit global point so the overlay can draw a
+    /// callout and fly the buddy cursor to it. Equatable so RegionVisualization
+    /// can drive SwiftUI's `.onChange(of:)`.
+    struct RegionAnnotation: Equatable {
+        /// Target location in AppKit global coordinates (bottom-left origin).
+        let globalPoint: CGPoint
+        /// Short plain-language label describing what is at this point.
+        let label: String
+    }
+
+    /// A fully resolved region visualization ready for the overlay to render.
+    /// Published on CompanionManager as `activeRegionVisualization`; nil when no
+    /// visualization is showing. Equatable is REQUIRED because BlueCursorView
+    /// observes it via `.onChange(of:)`, which needs an Equatable value.
+    struct RegionVisualization: Equatable {
+        /// The selected region in AppKit global coordinates (bottom-left origin).
+        let regionGlobalFrame: CGRect
+        /// The frame of the display the region is on (AppKit global coords) — used
+        /// by the overlay to decide which screen's BlueCursorView should render.
+        let displayFrame: CGRect
+        /// Short heading describing the region as a whole, or nil if Claude omitted it.
+        let heading: String?
+        /// Each annotation Claude returned, mapped to AppKit global coords.
+        let annotations: [RegionAnnotation]
+    }
+
     @Published private(set) var voiceState: CompanionVoiceState = .idle
     @Published private(set) var lastTranscript: String?
     @Published private(set) var currentAudioPowerLevel: CGFloat = 0
@@ -819,6 +849,108 @@ final class CompanionManager: ObservableObject {
             coordinate: CGPoint(x: x, y: y),
             elementLabel: elementLabel,
             screenNumber: screenNumber
+        )
+    }
+
+    // MARK: - Region Annotation Parsing
+
+    /// Parses a region-visualization response of the form:
+    ///
+    ///     HEADING: <3-6 word title>
+    ///     [ANNOTATE:x,y:label]
+    ///     [ANNOTATE:x,y:label]
+    ///     ...
+    ///
+    /// The leading HEADING line is optional. Zero or more [ANNOTATE:...] tags
+    /// may appear anywhere in the text (mirroring the [POINT:] grammar in
+    /// parsePointingCoordinates, but matching every occurrence instead of a
+    /// single tag anchored at the end). x,y are integer pixel coordinates in
+    /// the crop's coordinate space (top-left origin). Returns the optional
+    /// heading and an ordered list of (point, label) pairs. Pure function —
+    /// no UI, no actor state — so it is isolate-compilable with swiftc.
+    static func parseRegionAnnotations(from responseText: String) -> (heading: String?, annotations: [(point: CGPoint, label: String)]) {
+        // Parse an optional leading "HEADING: <text>" line. Case-insensitive
+        // and anchored to a line start so a stray "HEADING:" mid-label can't
+        // be picked up. Multiline mode so ^ matches the start of any line.
+        var heading: String? = nil
+        let headingPattern = #"(?im)^\s*HEADING:\s*(.+?)\s*$"#
+        if let headingRegex = try? NSRegularExpression(pattern: headingPattern, options: []),
+           let headingMatch = headingRegex.firstMatch(in: responseText, range: NSRange(responseText.startIndex..., in: responseText)),
+           headingMatch.numberOfRanges >= 2,
+           let headingTextRange = Range(headingMatch.range(at: 1), in: responseText) {
+            let headingText = String(responseText[headingTextRange]).trimmingCharacters(in: .whitespacesAndNewlines)
+            if !headingText.isEmpty {
+                heading = headingText
+            }
+        }
+
+        // Parse zero or more [ANNOTATE:x,y:label] tags. The coordinate+label
+        // grammar mirrors the [POINT:] pattern, but here we collect every
+        // match in document order rather than a single trailing tag. Tags
+        // with non-numeric coordinates or an empty label are skipped so a
+        // malformed tag can't crash or pollute the result.
+        var annotations: [(point: CGPoint, label: String)] = []
+        let annotationPattern = #"\[ANNOTATE:\s*(\d+)\s*,\s*(\d+)\s*:\s*([^\]]+?)\s*\]"#
+        if let annotationRegex = try? NSRegularExpression(pattern: annotationPattern, options: []) {
+            let fullRange = NSRange(responseText.startIndex..., in: responseText)
+            let matches = annotationRegex.matches(in: responseText, range: fullRange)
+            for match in matches {
+                guard match.numberOfRanges >= 4,
+                      let xRange = Range(match.range(at: 1), in: responseText),
+                      let yRange = Range(match.range(at: 2), in: responseText),
+                      let labelRange = Range(match.range(at: 3), in: responseText),
+                      let x = Double(responseText[xRange]),
+                      let y = Double(responseText[yRange]) else {
+                    continue
+                }
+                let label = String(responseText[labelRange]).trimmingCharacters(in: .whitespacesAndNewlines)
+                guard !label.isEmpty else { continue }
+                annotations.append((point: CGPoint(x: x, y: y), label: label))
+            }
+        }
+
+        return (heading: heading, annotations: annotations)
+    }
+
+    /// Maps a crop-pixel coordinate (top-left origin, in the crop image's
+    /// coordinate space) to an AppKit global point (bottom-left origin).
+    ///
+    /// This is the region-scoped version of the [POINT:] mapping math at
+    /// CompanionManager.swift:653-674: clamp into the source pixel bounds,
+    /// scale into the destination point space, flip Y (top-left -> bottom-left),
+    /// then offset by the destination origin. Here the source is the crop's
+    /// pixel size and the destination is the region's own point-sized frame.
+    /// Pure function — isolate-compilable with swiftc.
+    static func mapCropPixelToGlobal(pixelPoint: CGPoint, capture: RegionCapture) -> CGPoint {
+        let cropPixelWidth = CGFloat(capture.cropPixelWidth)
+        let cropPixelHeight = CGFloat(capture.cropPixelHeight)
+        let regionPointWidth = capture.regionGlobalFrame.width
+        let regionPointHeight = capture.regionGlobalFrame.height
+
+        // Guard against a degenerate crop so we never divide by zero; fall
+        // back to the region's origin (a safe on-screen point).
+        guard cropPixelWidth > 0, cropPixelHeight > 0 else {
+            return capture.regionGlobalFrame.origin
+        }
+
+        // Clamp into the crop's pixel bounds — same clamp the [POINT:] path
+        // applies to the screenshot coordinate space at lines 660-661.
+        let clampedX = max(0, min(pixelPoint.x, cropPixelWidth))
+        let clampedY = max(0, min(pixelPoint.y, cropPixelHeight))
+
+        // Scale from crop pixels into the region's point space (lines 664-665).
+        let regionLocalX = clampedX * (regionPointWidth / cropPixelWidth)
+        let regionLocalY = clampedY * (regionPointHeight / cropPixelHeight)
+
+        // Flip Y from top-left origin (crop) to bottom-left origin (AppKit),
+        // within the region's own point height (line 668).
+        let appKitLocalY = regionPointHeight - regionLocalY
+
+        // Offset by the region's global origin to land in AppKit global
+        // coordinates (lines 671-674).
+        return CGPoint(
+            x: regionLocalX + capture.regionGlobalFrame.origin.x,
+            y: appKitLocalY + capture.regionGlobalFrame.origin.y
         )
     }
 
