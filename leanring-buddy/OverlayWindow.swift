@@ -165,6 +165,23 @@ struct BlueCursorView: View {
     /// Only during the return flight can cursor movement cancel the animation.
     @State private var isReturningToCursor: Bool = false
 
+    // MARK: - Region Visualization State
+
+    /// Timer that auto-clears the active region visualization after a hold
+    /// period (default 12s) if the user does not dismiss it sooner. Invalidated
+    /// when a new visualization arrives, on manual clear, or on view disappear.
+    @State private var regionVisualizationAutoClearTimer: Timer?
+
+    /// True while the buddy is flying through the sequence of annotation points
+    /// for the active region visualization. While true, cursor-move cancellation
+    /// is suppressed so the full guided tour completes (mirrors the forward-flight
+    /// behavior of element pointing, where movement does not interrupt).
+    @State private var isAnnotationFlightInProgress: Bool = false
+
+    /// The SwiftUI position the buddy should rest at after the annotation tour
+    /// finishes — the last annotation's callout target — so it does not snap.
+    @State private var regionVisualizationRestPosition: CGPoint = .zero
+
     // MARK: - Onboarding Video Layout
 
     private let onboardingVideoPlayerWidth: CGFloat = 330
@@ -336,6 +353,11 @@ struct BlueCursorView: View {
                 .animation(.spring(response: 0.2, dampingFraction: 0.6, blendDuration: 0), value: cursorPosition)
                 .animation(.easeIn(duration: 0.15), value: companionManager.voiceState)
 
+            // Region visualization — selected-region rectangle, heading chip,
+            // callout labels, and connector lines. Only renders on the screen
+            // that contains the region, gated inside the computed section below.
+            activeRegionVisualizationSection
+
         }
         .frame(width: screenFrame.width, height: screenFrame.height)
         .ignoresSafeArea()
@@ -366,6 +388,8 @@ struct BlueCursorView: View {
         .onDisappear {
             timer?.invalidate()
             navigationAnimationTimer?.invalidate()
+            regionVisualizationAutoClearTimer?.invalidate()
+            regionVisualizationAutoClearTimer = nil
             companionManager.tearDownOnboardingVideo()
         }
         .onChange(of: companionManager.detectedElementScreenLocation) { newLocation in
@@ -383,6 +407,102 @@ struct BlueCursorView: View {
             }
 
             startNavigatingToElement(screenLocation: screenLocation)
+        }
+        .onChange(of: companionManager.activeRegionVisualization) { newVisualization in
+            // Tear down any prior auto-clear timer whenever the visualization changes.
+            regionVisualizationAutoClearTimer?.invalidate()
+            regionVisualizationAutoClearTimer = nil
+
+            guard let visualization = newVisualization else {
+                // Visualization was cleared — stop any in-progress guided flight.
+                if isAnnotationFlightInProgress {
+                    finishRegionVisualizationFlight()
+                }
+                return
+            }
+
+            // Only the screen that contains the region drives the flight + auto-clear.
+            guard regionVisualizationIsOnThisScreen(visualization) else { return }
+
+            // Fly the buddy through the annotations (guards internally against
+            // colliding with an element-pointing flight).
+            beginRegionVisualizationFlight(visualization)
+
+            // Auto-fade after a 12s hold if the user does not dismiss sooner.
+            // CompanionManager owns the actual clear so all dismissal paths
+            // (Esc, re-press, push-to-talk, auto) funnel through one place.
+            regionVisualizationAutoClearTimer = Timer.scheduledTimer(withTimeInterval: 12.0, repeats: false) { _ in
+                Task { @MainActor in
+                    print("🗺️ Region visualization: 12s hold elapsed, auto-clearing")
+                    companionManager.clearRegionVisualization()
+                }
+            }
+        }
+    }
+
+    /// Renders the active region visualization on the screen that owns it:
+    /// a thin rounded rectangle around the selected region, a heading title chip
+    /// near its top-left, and a callout label + connector line for each annotation.
+    /// Returns nothing on screens that do not contain the region (so only one
+    /// monitor ever draws it), and when no visualization is active.
+    @ViewBuilder
+    private var activeRegionVisualizationSection: some View {
+        if let visualization = companionManager.activeRegionVisualization,
+           regionVisualizationIsOnThisScreen(visualization) {
+
+            // Region frame converted from AppKit global to this screen's SwiftUI
+            // coordinate space. AppKit y is bottom-left; flipping the origin means
+            // the AppKit max-y corner becomes the SwiftUI top edge.
+            let regionGlobalFrame = visualization.regionGlobalFrame
+            let topLeftGlobal = CGPoint(x: regionGlobalFrame.minX, y: regionGlobalFrame.maxY)
+            let topLeftSwiftUI = swiftUIPointForGlobalPoint(topLeftGlobal)
+            let regionRectInSwiftUI = CGRect(
+                x: topLeftSwiftUI.x,
+                y: topLeftSwiftUI.y,
+                width: regionGlobalFrame.width,
+                height: regionGlobalFrame.height
+            )
+
+            // Thin rounded rectangle around the selected region.
+            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                .stroke(DS.Colors.regionSelectionStroke, lineWidth: 2)
+                .background(
+                    RoundedRectangle(cornerRadius: 8, style: .continuous)
+                        .fill(DS.Colors.regionSelectionFill)
+                )
+                .frame(width: regionRectInSwiftUI.width, height: regionRectInSwiftUI.height)
+                .position(x: regionRectInSwiftUI.midX, y: regionRectInSwiftUI.midY)
+                .shadow(color: DS.Colors.regionSelectionStroke.opacity(0.4), radius: 8, x: 0, y: 0)
+                .allowsHitTesting(false)
+
+            // Heading title chip near the region's top-left corner.
+            if let heading = visualization.heading, !heading.isEmpty {
+                Text(heading)
+                    .font(.system(size: 11, weight: .semibold))
+                    .foregroundColor(.white)
+                    .padding(.horizontal, 8)
+                    .padding(.vertical, 4)
+                    .background(
+                        RoundedRectangle(cornerRadius: 6, style: .continuous)
+                            .fill(DS.Colors.annotationCallout)
+                            .shadow(color: DS.Colors.annotationCallout.opacity(0.5), radius: 6, x: 0, y: 0)
+                    )
+                    .fixedSize()
+                    .position(x: regionRectInSwiftUI.minX + 4, y: regionRectInSwiftUI.minY - 14)
+                    .allowsHitTesting(false)
+            }
+
+            // One callout (label bubble + connector line) per annotation.
+            ForEach(Array(visualization.annotations.enumerated()), id: \.offset) { _, annotation in
+                let targetPoint = swiftUIPointForGlobalPoint(annotation.globalPoint)
+                let labelPoint = calloutLabelOffsetPoint(forTargetPoint: targetPoint)
+                RegionAnnotationCalloutView(
+                    label: annotation.label,
+                    targetPoint: targetPoint,
+                    labelPoint: labelPoint
+                )
+                .allowsHitTesting(false)
+            }
         }
     }
 
@@ -412,6 +532,26 @@ struct BlueCursorView: View {
         timer = Timer.scheduledTimer(withTimeInterval: 0.016, repeats: true) { _ in
             let mouseLocation = NSEvent.mouseLocation
             self.isCursorOnThisScreen = self.screenFrame.contains(mouseLocation)
+
+            // Region visualization dismissal: once the guided annotation tour has
+            // finished (isAnnotationFlightInProgress == false) but the rectangle +
+            // callouts are still showing, a >100px cursor move clears it — same
+            // gesture and threshold as the element-pointing return-flight cancel below.
+            if !self.isAnnotationFlightInProgress,
+               let activeVisualization = self.companionManager.activeRegionVisualization,
+               self.regionVisualizationIsOnThisScreen(activeVisualization) {
+                let currentMouseInSwiftUI = self.convertScreenPointToSwiftUICoordinates(mouseLocation)
+                let distanceFromFlightStart = hypot(
+                    currentMouseInSwiftUI.x - self.cursorPositionWhenNavigationStarted.x,
+                    currentMouseInSwiftUI.y - self.cursorPositionWhenNavigationStarted.y
+                )
+                if distanceFromFlightStart > 100 {
+                    print("🗺️ Region visualization: cursor moved >100px, clearing")
+                    self.regionVisualizationAutoClearTimer?.invalidate()
+                    self.regionVisualizationAutoClearTimer = nil
+                    self.companionManager.clearRegionVisualization()
+                }
+            }
 
             // During forward flight or pointing, the buddy is NOT interrupted by
             // mouse movement — it completes its full animation and return flight.
@@ -672,6 +812,137 @@ struct BlueCursorView: View {
         companionManager.clearDetectedElementLocation()
     }
 
+    // MARK: - Region Visualization Flight
+
+    /// Whether the given region visualization belongs to THIS screen — true when
+    /// this screen's frame contains the region's center point. Mirrors the
+    /// single-buddy rule used for element pointing (see buddyIsVisibleOnThisScreen)
+    /// so only one BlueCursorView ever draws it.
+    private func regionVisualizationIsOnThisScreen(_ visualization: CompanionManager.RegionVisualization) -> Bool {
+        let regionCenter = CGPoint(
+            x: visualization.regionGlobalFrame.midX,
+            y: visualization.regionGlobalFrame.midY
+        )
+        return screenFrame.contains(regionCenter)
+    }
+
+    /// Converts an AppKit global point to this screen's SwiftUI coordinate space.
+    /// Thin wrapper over convertScreenPointToSwiftUICoordinates so the annotation
+    /// rendering and the flight share one conversion (keeps coordinates consistent).
+    private func swiftUIPointForGlobalPoint(_ globalPoint: CGPoint) -> CGPoint {
+        return convertScreenPointToSwiftUICoordinates(globalPoint)
+    }
+
+    /// Where the callout label bubble sits relative to its target point:
+    /// 14pt up and to the right, so the label clears the target and the
+    /// connector line is visible.
+    private func calloutLabelOffsetPoint(forTargetPoint targetPoint: CGPoint) -> CGPoint {
+        return CGPoint(x: targetPoint.x + 14, y: targetPoint.y - 14)
+    }
+
+    /// Begins flying the buddy through every annotation in the visualization,
+    /// one after another, pausing on each. Refuses to start if the buddy is
+    /// already busy with an element-pointing flight (both paths share
+    /// buddyNavigationMode + the flight timer, so they must not run together).
+    private func beginRegionVisualizationFlight(_ visualization: CompanionManager.RegionVisualization) {
+        // Don't fight the existing element-pointing flight. If it's mid-flight we
+        // skip the guided tour — the rectangle + callouts still render statically.
+        guard buddyNavigationMode == .followingCursor else {
+            print("🗺️ Region visualization: buddy busy navigating, skipping guided flight")
+            return
+        }
+
+        // Don't interrupt the first-launch welcome animation.
+        guard !showWelcome || welcomeText.isEmpty else {
+            print("🗺️ Region visualization: welcome animation active, skipping guided flight")
+            return
+        }
+
+        guard !visualization.annotations.isEmpty else {
+            print("🗺️ Region visualization: no annotations to fly to")
+            return
+        }
+
+        // Record cursor position so the post-tour >100px cursor-move cancel works
+        // the same way element pointing does (read in startTrackingCursor).
+        let mouseLocation = NSEvent.mouseLocation
+        cursorPositionWhenNavigationStarted = convertScreenPointToSwiftUICoordinates(mouseLocation)
+
+        isAnnotationFlightInProgress = true
+        isReturningToCursor = false
+        buddyNavigationMode = .navigatingToTarget
+
+        print("🗺️ Region visualization: flying buddy through \(visualization.annotations.count) annotations")
+        flyBuddyToAnnotation(at: 0, annotations: visualization.annotations)
+    }
+
+    /// Recursively flies the buddy to annotation `index`, holds ~1.2s, then
+    /// advances to the next. When the last annotation is reached, finishes the
+    /// flight and lets the buddy rest beside the final target.
+    private func flyBuddyToAnnotation(
+        at index: Int,
+        annotations: [CompanionManager.RegionAnnotation]
+    ) {
+        // Stop if the visualization was cleared out from under us mid-tour.
+        guard companionManager.activeRegionVisualization != nil else {
+            finishRegionVisualizationFlight()
+            return
+        }
+
+        guard index < annotations.count else {
+            finishRegionVisualizationFlight()
+            return
+        }
+
+        let annotation = annotations[index]
+        let targetInSwiftUI = swiftUIPointForGlobalPoint(annotation.globalPoint)
+
+        // Offset so the buddy sits beside the annotated point (8 right, 12 below),
+        // matching the element-pointing offset in startNavigatingToElement.
+        let offsetTarget = CGPoint(x: targetInSwiftUI.x + 8, y: targetInSwiftUI.y + 12)
+
+        // Clamp inside the screen with padding, same as startNavigatingToElement.
+        let clampedTarget = CGPoint(
+            x: max(20, min(offsetTarget.x, screenFrame.width - 20)),
+            y: max(20, min(offsetTarget.y, screenFrame.height - 20))
+        )
+
+        animateBezierFlightArc(to: clampedTarget) {
+            // If the visualization was cleared or another flight took over, bail.
+            guard self.buddyNavigationMode == .navigatingToTarget,
+                  self.isAnnotationFlightInProgress else { return }
+
+            // Rest pointer angle while pausing on this annotation.
+            self.triangleRotationDegrees = -35.0
+            self.regionVisualizationRestPosition = clampedTarget
+
+            // Hold ~1.2s on this annotation, then advance to the next one.
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1.2) {
+                guard self.isAnnotationFlightInProgress,
+                      self.buddyNavigationMode == .navigatingToTarget else { return }
+                self.flyBuddyToAnnotation(at: index + 1, annotations: annotations)
+            }
+        }
+    }
+
+    /// Ends the guided annotation tour: the buddy rests in place, navigation mode
+    /// returns to following, and the cursor-move cancel becomes armed (handled in
+    /// startTrackingCursor). Does NOT clear the visualization — the rectangle and
+    /// callouts stay until the auto-clear timer fires or the user dismisses.
+    private func finishRegionVisualizationFlight() {
+        navigationAnimationTimer?.invalidate()
+        navigationAnimationTimer = nil
+        isAnnotationFlightInProgress = false
+        // Returning to .followingCursor re-arms normal cursor tracking; the buddy
+        // springs back to the cursor on the next mouse move (the desired
+        // "tour done, resume following" behavior).
+        buddyNavigationMode = .followingCursor
+        isReturningToCursor = false
+        triangleRotationDegrees = -35.0
+        buddyFlightScale = 1.0
+        print("🗺️ Region visualization: guided flight finished, resuming cursor following")
+    }
+
     // MARK: - Welcome Animation
 
     private func startWelcomeAnimation() {
@@ -698,6 +969,52 @@ struct BlueCursorView: View {
             let index = self.fullWelcomeMessage.index(self.fullWelcomeMessage.startIndex, offsetBy: currentIndex)
             self.welcomeText.append(self.fullWelcomeMessage[index])
             currentIndex += 1
+        }
+    }
+}
+
+// MARK: - Region Annotation Callout
+
+/// A single annotation callout drawn over a visualized region: a thin connector
+/// line from the label bubble to the target point, a small dot at the target,
+/// plus the label bubble itself. The bubble styling intentionally matches the
+/// navigation pointer bubble so callouts feel like the same "buddy speaking"
+/// affordance. Coordinates are in this screen's SwiftUI space.
+private struct RegionAnnotationCalloutView: View {
+    let label: String
+    /// The point being annotated (in SwiftUI coordinates).
+    let targetPoint: CGPoint
+    /// Where the label bubble is anchored (offset up-right of the target).
+    let labelPoint: CGPoint
+
+    var body: some View {
+        ZStack {
+            // Thin connector line from the label anchor to the target point.
+            Path { path in
+                path.move(to: labelPoint)
+                path.addLine(to: targetPoint)
+            }
+            .stroke(DS.Colors.annotationConnector, lineWidth: 1)
+
+            // A small dot marking the exact target point.
+            Circle()
+                .fill(DS.Colors.annotationCallout)
+                .frame(width: 5, height: 5)
+                .position(targetPoint)
+
+            // Label bubble — same styling as the navigation pointer bubble.
+            Text(label)
+                .font(.system(size: 11, weight: .medium))
+                .foregroundColor(.white)
+                .padding(.horizontal, 8)
+                .padding(.vertical, 4)
+                .background(
+                    RoundedRectangle(cornerRadius: 6, style: .continuous)
+                        .fill(DS.Colors.annotationCallout)
+                        .shadow(color: DS.Colors.annotationCallout.opacity(0.5), radius: 6, x: 0, y: 0)
+                )
+                .fixedSize()
+                .position(labelPoint)
         }
     }
 }
