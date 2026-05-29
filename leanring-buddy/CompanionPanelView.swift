@@ -31,6 +31,9 @@ struct CompanionPanelView: View {
 
                 modelPickerRow
                     .padding(.horizontal, 16)
+
+                visualizeRegionRow
+                    .padding(.horizontal, 16)
             }
 
             if !companionManager.allPermissionsGranted {
@@ -636,6 +639,56 @@ struct CompanionPanelView: View {
                     RoundedRectangle(cornerRadius: 5, style: .continuous)
                         .fill(isSelected ? Color.white.opacity(0.1) : Color.clear)
                 )
+        }
+        .buttonStyle(.plain)
+        .pointerCursor()
+    }
+
+    // MARK: - Visualize a Region
+
+    private var visualizeRegionRow: some View {
+        Button(action: {
+            // Mirror the .clickyDismissPanel button: post a NotificationCenter
+            // event that CompanionManager observes. The manager dismisses the
+            // panel and begins region selection — identical to the ⌃⇧V hotkey path.
+            NotificationCenter.default.post(name: .clickyStartRegionVisualization, object: nil)
+        }) {
+            HStack(spacing: 8) {
+                Image(systemName: "rectangle.dashed")
+                    .font(.system(size: 12, weight: .medium))
+
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("Visualize a region")
+                        .font(.system(size: 12, weight: .semibold))
+                    Text("Select an area and I'll explain what's in it.")
+                        .font(.system(size: 10))
+                        .foregroundColor(DS.Colors.textTertiary)
+                }
+
+                Spacer()
+
+                Text("⌃⇧V")
+                    .font(.system(size: 11, weight: .medium, design: .rounded))
+                    .foregroundColor(DS.Colors.textTertiary)
+                    .padding(.horizontal, 6)
+                    .padding(.vertical, 3)
+                    .background(
+                        RoundedRectangle(cornerRadius: 5, style: .continuous)
+                            .fill(Color.white.opacity(0.06))
+                    )
+            }
+            .foregroundColor(DS.Colors.textSecondary)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(.horizontal, 12)
+            .padding(.vertical, 10)
+            .background(
+                RoundedRectangle(cornerRadius: DS.CornerRadius.medium, style: .continuous)
+                    .fill(Color.white.opacity(0.06))
+            )
+            .overlay(
+                RoundedRectangle(cornerRadius: DS.CornerRadius.medium, style: .continuous)
+                    .stroke(DS.Colors.borderSubtle, lineWidth: 0.5)
+            )
         }
         .buttonStyle(.plain)
         .pointerCursor()
