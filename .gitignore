@@ -4,5 +4,10 @@ worker/.dev.vars
 *.xcuserstate
 build/
 releases/
-.claude/
+# Ignore local/transient Claude Code state, but keep the project-shared
+# agentic config (agents, skills) and settings under version control.
+.claude/*
+!.claude/agents/
+!.claude/skills/
+!.claude/settings.json
 coding-plans/
