@@ -84,6 +84,11 @@ enum BuddyPushToTalkShortcut {
         case none
         case pressed
         case released
+        /// Emitted when the user presses ⌃⇧V (control + shift + V) to start the
+        /// "visualize a region" flow. Produced by a dedicated key detector in
+        /// GlobalPushToTalkShortcutMonitor, not by the modifier-only push-to-talk
+        /// factory functions below (which only ever return none/pressed/released).
+        case visualizeRegionRequested
     }
 
     private enum ShortcutEventType {

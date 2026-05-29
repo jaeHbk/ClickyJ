@@ -72,6 +72,12 @@ final class CompanionManager: ObservableObject {
     /// BlueCursorView uses this instead of a random pointer phrase.
     @Published var detectedElementBubbleText: String?
 
+    /// The currently displayed region visualization, or nil when none is active.
+    /// Set by visualizeRegion(globalRect:on:); cleared by clearRegionVisualization().
+    /// Observed by BlueCursorView to draw the region outline, callouts, and connector
+    /// lines, and to fly the buddy to each annotation in sequence.
+    @Published var activeRegionVisualization: RegionVisualization?
+
     // MARK: - Onboarding Video State (shared across all screen overlays)
 
     @Published var onboardingVideoPlayer: AVPlayer?
@@ -95,6 +101,10 @@ final class CompanionManager: ObservableObject {
     let buddyDictationManager = BuddyDictationManager()
     let globalPushToTalkShortcutMonitor = GlobalPushToTalkShortcutMonitor()
     let overlayWindowManager = OverlayWindowManager()
+    /// Presents the mouse-accepting rubber-band selection window for the
+    /// "visualize a region" feature. Defined in RegionSelectionView.swift.
+    /// Independent of CompanionManager — we drive it and receive the final rect.
+    let regionSelectionController = RegionSelectionController()
     // Response text is now displayed inline on the cursor overlay via
     // streamingResponseText, so no separate response overlay manager is needed.
 
@@ -126,6 +136,10 @@ final class CompanionManager: ObservableObject {
     /// Scheduled hide for transient cursor mode — cancelled if the user
     /// speaks again before the delay elapses.
     private var transientHideTask: Task<Void, Never>?
+    /// Token for the .clickyStartRegionVisualization observer so the panel's
+    /// "Visualize a region" row can trigger the same flow as the ⌃⇧V hotkey.
+    /// Removed in stop() to avoid leaking the captured closure.
+    private var startRegionVisualizationObserver: NSObjectProtocol?
 
     /// True when all three required permissions (accessibility, screen recording,
     /// microphone) are granted. Used by the panel to show a single "all good" state.
@@ -209,6 +223,19 @@ final class CompanionManager: ObservableObject {
         bindVoiceStateObservation()
         bindAudioPowerLevel()
         bindShortcutTransitions()
+        // Observe the panel's "Visualize a region" row so it triggers the same
+        // flow as the ⌃⇧V hotkey. The notification arrives on the main queue;
+        // CompanionManager is @MainActor, so hop onto the main actor before
+        // touching state (consistent with promptForMicrophoneIfNotDetermined).
+        startRegionVisualizationObserver = NotificationCenter.default.addObserver(
+            forName: .clickyStartRegionVisualization,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            Task { @MainActor [weak self] in
+                self?.beginRegionSelection()
+            }
+        }
         // Eagerly touch the Claude API so its TLS warmup handshake completes
         // well before the onboarding demo fires at ~40s into the video.
         _ = claudeAPI
@@ -325,11 +352,16 @@ final class CompanionManager: ObservableObject {
 
         currentResponseTask?.cancel()
         currentResponseTask = nil
+        activeRegionVisualization = nil
         shortcutTransitionCancellable?.cancel()
         voiceStateCancellable?.cancel()
         audioPowerCancellable?.cancel()
         accessibilityCheckTimer?.invalidate()
         accessibilityCheckTimer = nil
+        if let startRegionVisualizationObserver {
+            NotificationCenter.default.removeObserver(startRegionVisualizationObserver)
+            self.startRegionVisualizationObserver = nil
+        }
     }
 
     func refreshAllPermissions() {
@@ -525,6 +557,8 @@ final class CompanionManager: ObservableObject {
             currentResponseTask?.cancel()
             elevenLabsTTSClient.stopPlayback()
             clearDetectedElementLocation()
+            // Starting push-to-talk also dismisses any showing region visualization.
+            clearRegionVisualization()
 
             // Dismiss the onboarding prompt if it's showing
             if showOnboardingPrompt {
@@ -564,9 +598,157 @@ final class CompanionManager: ObservableObject {
             pendingKeyboardShortcutStartTask?.cancel()
             pendingKeyboardShortcutStartTask = nil
             buddyDictationManager.stopPushToTalkFromKeyboardShortcut()
+        case .visualizeRegionRequested:
+            // ⌃⇧V pressed — start region selection (cancels any in-flight work,
+            // dismisses the panel, ensures the overlay is visible, then presents
+            // the marquee). Same entry point as the panel's "Visualize a region" row.
+            beginRegionSelection()
         case .none:
             break
         }
+    }
+
+    // MARK: - Region Visualization
+
+    /// Entry point for the "visualize a region" feature, shared by the ⌃⇧V hotkey
+    /// and the panel's "Visualize a region" row. Cancels any in-flight work (so a
+    /// new visualization cleanly interrupts an old one), dismisses the panel,
+    /// ensures the cursor overlay is visible, then presents the rubber-band
+    /// selection window. On a real selection we proceed to visualizeRegion; on
+    /// cancel (Esc / too-small / lost focus) we do nothing.
+    func beginRegionSelection() {
+        // Cancel any in-progress AI response, TTS, and pending pointing flight
+        // from a previous utterance or visualization.
+        currentResponseTask?.cancel()
+        elevenLabsTTSClient.stopPlayback()
+        clearDetectedElementLocation()
+
+        // Clear any prior visualization so a fresh selection starts clean.
+        activeRegionVisualization = nil
+
+        // Cancel any pending transient hide so the overlay stays up for the flight.
+        transientHideTask?.cancel()
+        transientHideTask = nil
+
+        // Dismiss the menu bar panel so it doesn't cover the region being selected.
+        NotificationCenter.default.post(name: .clickyDismissPanel, object: nil)
+
+        // If the cursor overlay is hidden (transient mode or "Show Clicky" off),
+        // bring it up so the buddy can fly to the annotations after capture.
+        if !isOverlayVisible {
+            overlayWindowManager.hasShownOverlayBefore = true
+            overlayWindowManager.showOverlay(onScreens: NSScreen.screens, companionManager: self)
+            isOverlayVisible = true
+        }
+
+        print("🔲 Region visualization: presenting selection marquee")
+
+        regionSelectionController.beginSelection { [weak self] selectionResult in
+            guard let self else { return }
+            guard let (selectedGlobalRect, selectedScreen) = selectionResult else {
+                // Selection was cancelled (Esc, drag too small, or lost focus).
+                // The controller has already torn down its window; nothing to do.
+                print("🔲 Region visualization: selection cancelled")
+                return
+            }
+            self.visualizeRegion(globalRect: selectedGlobalRect, on: selectedScreen)
+        }
+    }
+
+    /// Captures the selected region as a tight JPEG crop, asks Claude for a
+    /// heading plus up to ~5 [ANNOTATE:x,y:label] tags, maps each crop-pixel
+    /// coordinate to AppKit global space, and publishes a RegionVisualization for
+    /// BlueCursorView to render and fly the buddy through. Mirrors the structure
+    /// of sendTranscriptToClaudeWithScreenshot, but with no conversation history,
+    /// no TTS, and no [POINT] flight — annotation flight is driven by the overlay.
+    /// Reuses currentResponseTask so a new utterance or visualization interrupts it.
+    func visualizeRegion(globalRect: CGRect, on screen: NSScreen) {
+        currentResponseTask?.cancel()
+        elevenLabsTTSClient.stopPlayback()
+        ClickyAnalytics.trackRegionVisualizationStarted()
+
+        currentResponseTask = Task {
+            // Spinner state while we capture and call Claude. No streaming text.
+            voiceState = .processing
+
+            do {
+                // Capture exactly the selected region (Clicky's own overlays are
+                // excluded by the capture utility's content filter).
+                let regionCapture = try await CompanionScreenCaptureUtility.captureRegionAsJPEG(
+                    globalRect: globalRect,
+                    on: screen
+                )
+
+                guard !Task.isCancelled else { return }
+
+                let fullResponseText = try await claudeAPI.analyzeRegionForAnnotations(
+                    imageData: regionCapture.imageData,
+                    cropPixelWidth: regionCapture.cropPixelWidth,
+                    cropPixelHeight: regionCapture.cropPixelHeight
+                )
+
+                guard !Task.isCancelled else { return }
+
+                // Parse the heading + [ANNOTATE:x,y:label] tags (pure function).
+                let parseResult = Self.parseRegionAnnotations(from: fullResponseText)
+
+                // Map each crop-pixel coordinate to AppKit global space using the
+                // same transform [POINT:] uses, shared via mapCropPixelToGlobal.
+                let mappedAnnotations: [RegionAnnotation] = parseResult.annotations.map { annotation in
+                    let globalPoint = Self.mapCropPixelToGlobal(
+                        pixelPoint: annotation.point,
+                        capture: regionCapture
+                    )
+                    return RegionAnnotation(globalPoint: globalPoint, label: annotation.label)
+                }
+
+                // If Claude returned no usable annotations, treat it as a failure:
+                // clear state, log, count it, and don't show an empty overlay.
+                guard !mappedAnnotations.isEmpty else {
+                    print("🔲 Region visualization: no annotations parsed")
+                    ClickyAnalytics.trackRegionVisualizationFailed(reason: "no_annotations")
+                    activeRegionVisualization = nil
+                    voiceState = .idle
+                    return
+                }
+
+                let visualization = RegionVisualization(
+                    regionGlobalFrame: regionCapture.regionGlobalFrame,
+                    displayFrame: regionCapture.displayFrame,
+                    heading: parseResult.heading,
+                    annotations: mappedAnnotations
+                )
+
+                // Switch to idle BEFORE publishing so the triangle is visible and
+                // can fly to the annotation targets (the spinner would hide it).
+                voiceState = .idle
+                activeRegionVisualization = visualization
+
+                ClickyAnalytics.trackRegionVisualizationCompleted(annotationCount: mappedAnnotations.count)
+                print("🔲 Region visualization: showing \(mappedAnnotations.count) annotations — heading: \"\(parseResult.heading ?? "none")\"")
+            } catch is CancellationError {
+                // A new utterance or a new ⌃⇧V interrupted this visualization.
+            } catch {
+                ClickyAnalytics.trackRegionVisualizationFailed(reason: "error")
+                print("⚠️ Region visualization error: \(error)")
+                activeRegionVisualization = nil
+            }
+
+            if !Task.isCancelled {
+                voiceState = .idle
+            }
+        }
+    }
+
+    /// Cancels any in-flight region work and clears the active visualization,
+    /// returning the buddy to normal cursor-following. Called when the user
+    /// starts push-to-talk, presses ⌃⇧V again, or the app stops.
+    func clearRegionVisualization() {
+        currentResponseTask?.cancel()
+        if activeRegionVisualization != nil {
+            print("🔲 Region visualization: cleared")
+        }
+        activeRegionVisualization = nil
     }
 
     // MARK: - Companion Prompt

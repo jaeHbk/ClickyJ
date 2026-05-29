@@ -23,6 +23,16 @@ final class GlobalPushToTalkShortcutMonitor: ObservableObject {
     /// waiting for the async dictation state pipeline to catch up.
     @Published private(set) var isShortcutCurrentlyPressed = false
 
+    /// macOS virtual keycode for the V key.
+    private static let visualizeRegionKeyCode: UInt16 = 9
+
+    /// True while a ⌃⇧V keyDown has already produced a .visualizeRegionRequested
+    /// signal for the current physical press. macOS sends repeated keyDown events
+    /// while a key is held; this latch ensures exactly one signal per press. Reset
+    /// on the matching V keyUp. Runs on the main thread (the tap callback runs on
+    /// CFRunLoopGetMain), so no extra synchronization is needed.
+    private var hasEmittedVisualizeRegionForCurrentKeyPress = false
+
     deinit {
         stop()
     }
@@ -85,6 +95,7 @@ final class GlobalPushToTalkShortcutMonitor: ObservableObject {
 
     func stop() {
         isShortcutCurrentlyPressed = false
+        hasEmittedVisualizeRegionForCurrentKeyPress = false
 
         if let globalEventTapRunLoopSource {
             CFRunLoopRemoveSource(CFRunLoopGetMain(), globalEventTapRunLoopSource, .commonModes)
@@ -109,6 +120,28 @@ final class GlobalPushToTalkShortcutMonitor: ObservableObject {
         }
 
         let eventKeyCode = UInt16(event.getIntegerValueField(.keyboardEventKeycode))
+
+        // ⌃⇧V (control + shift + V) starts the "visualize a region" flow. This is
+        // a dedicated detector separate from the modifier-only push-to-talk logic
+        // below — it never mutates isShortcutCurrentlyPressed. Detect on the V
+        // keyDown while control and shift are both held; a latch keeps key-repeat
+        // from firing the signal more than once per physical press.
+        if eventKeyCode == Self.visualizeRegionKeyCode {
+            let deviceIndependentModifiers = NSEvent.ModifierFlags(rawValue: UInt(event.flags.rawValue))
+                .intersection(.deviceIndependentFlagsMask)
+            let hasControlAndShift = deviceIndependentModifiers.contains([.control, .shift])
+
+            if eventType == .keyDown && hasControlAndShift && !hasEmittedVisualizeRegionForCurrentKeyPress {
+                hasEmittedVisualizeRegionForCurrentKeyPress = true
+                shortcutTransitionPublisher.send(.visualizeRegionRequested)
+                return Unmanaged.passUnretained(event)
+            }
+
+            if eventType == .keyUp {
+                hasEmittedVisualizeRegionForCurrentKeyPress = false
+            }
+        }
+
         let shortcutTransition = BuddyPushToTalkShortcut.shortcutTransition(
             for: eventType,
             keyCode: eventKeyCode,
@@ -125,6 +158,11 @@ final class GlobalPushToTalkShortcutMonitor: ObservableObject {
         case .released:
             isShortcutCurrentlyPressed = false
             shortcutTransitionPublisher.send(.released)
+        case .visualizeRegionRequested:
+            // The push-to-talk factory never produces this transition; the ⌃⇧V
+            // signal is emitted directly above. This case exists only so the
+            // switch stays exhaustive.
+            break
         }
 
         return Unmanaged.passUnretained(event)
