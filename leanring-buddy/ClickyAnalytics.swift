@@ -103,6 +103,30 @@ enum ClickyAnalytics {
         ])
     }
 
+    // MARK: - Region Visualization
+
+    /// User triggered "Visualize a region" (⌃⇧V or the panel row) and a selection
+    /// began. No screen content is ever sent — only the event.
+    static func trackRegionVisualizationStarted() {
+        PostHogSDK.shared.capture("region_visualization_started")
+    }
+
+    /// Claude returned annotations for a selected region and the overlay is drawing them.
+    /// Records only the count, never the captured image or any on-screen text.
+    static func trackRegionVisualizationCompleted(annotationCount: Int) {
+        PostHogSDK.shared.capture("region_visualization_completed", properties: [
+            "annotation_count": annotationCount
+        ])
+    }
+
+    /// The region visualization failed (capture, network, or no annotations parsed).
+    /// Records only a coarse reason string, never screen content.
+    static func trackRegionVisualizationFailed(reason: String) {
+        PostHogSDK.shared.capture("region_visualization_failed", properties: [
+            "reason": reason
+        ])
+    }
+
     // MARK: - Errors
 
     /// An error occurred during the AI response pipeline.

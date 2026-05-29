@@ -143,6 +143,26 @@ enum DS {
         /// (screen overlay vs in-app UI).
         static let overlayCursorBlue = Color(hex: "#3380FF")
 
+        // ── Region Visualization (Visualize a Region feature) ────────
+        // Colors for the drag-select marquee and the annotated-overlay callouts.
+        // Derived from the same blue identity as the cursor so the feature reads
+        // as part of Clicky, not a foreign UI.
+
+        /// Stroke color for the rubber-band selection rectangle and the thin
+        /// outline drawn around the captured region.
+        static let regionSelectionStroke = overlayCursorBlue
+
+        /// Low-opacity fill inside the selection rectangle so the marquee reads
+        /// as a highlight without obscuring what's underneath.
+        static let regionSelectionFill = blue500.opacity(0.12)
+
+        /// Background fill for an annotation callout label.
+        static let annotationCallout = overlayCursorBlue
+
+        /// Color of the thin connector line drawn from a callout label to the
+        /// point on screen it annotates.
+        static let annotationConnector = blue400.opacity(0.85)
+
         // ── Floating Button Gradient ─────────────────────────────────
 
         /// The floating session button gradient colors (unchanged from original —

@@ -16,6 +16,9 @@ import SwiftUI
 
 extension Notification.Name {
     static let clickyDismissPanel = Notification.Name("clickyDismissPanel")
+    /// Posted by the panel's "Visualize a region" row to ask CompanionManager to
+    /// begin region selection — the same entry point as the ⌃⇧V global shortcut.
+    static let clickyStartRegionVisualization = Notification.Name("clickyStartRegionVisualization")
 }
 
 /// Custom NSPanel subclass that can become the key window even with
