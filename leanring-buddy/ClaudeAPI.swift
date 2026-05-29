@@ -288,4 +288,99 @@ class ClaudeAPI {
         let duration = Date().timeIntervalSince(startTime)
         return (text: text, duration: duration)
     }
+
+    /// System prompt for the "Visualize a region" feature. The user drag-selected a
+    /// rectangle of their screen; Claude sees only that cropped image and must answer
+    /// with a one-line heading followed by up to five [ANNOTATE:x,y:label] tags whose
+    /// x,y are integer pixel coordinates in the crop's own coordinate space (top-left
+    /// origin). The same crop-pixel coordinate convention as [POINT:] is reused so the
+    /// existing scaling math can map annotations back onto the screen.
+    private static let regionAnnotationSystemPrompt = """
+    you're clicky. the user drag-selected a region of their screen and wants you to visualize/explain what's inside it. look only at the cropped image provided. respond with a single heading line, then up to five annotation tags, nothing else.
+
+    first line: HEADING: <3 to 6 word title of what this region is>
+
+    then one tag per important part you want to call out:
+    [ANNOTATE:x,y:label] where x,y are integer pixel coordinates in THIS image's space (origin top-left, x right, y down — the image dimensions are given), and label is a 2 to 5 word plain-language explanation of that part. point at concrete, specific things (a function name, a button, a field, a value), not vague areas. order the annotations the way you'd explain them to a learner. all lowercase. no emojis.
+
+    if there is nothing meaningful to annotate, respond with HEADING: nothing to show and no annotation tags.
+    """
+
+    /// Sends a single cropped region image to Claude (via the Worker `/chat` proxy) and
+    /// asks for annotation tags. Non-streaming because we parse a structured tail
+    /// (`HEADING:` + `[ANNOTATE:...]` lines) rather than display streaming text.
+    /// Modeled on `analyzeImage(...)`: same `session`, `makeAPIRequest()`,
+    /// `detectImageMediaType(for:)`, and base64 encoding. Returns the raw response text;
+    /// parsing happens in `CompanionManager.parseRegionAnnotations(from:)`.
+    ///
+    /// Routes through the same `apiURL` (the Cloudflare Worker `/chat` endpoint passed to
+    /// `init`), NOT `api.anthropic.com` directly — no new Worker route is required.
+    func analyzeRegionForAnnotations(
+        imageData: Data,
+        cropPixelWidth: Int,
+        cropPixelHeight: Int
+    ) async throws -> String {
+        var request = makeAPIRequest()
+
+        // Embed the crop's pixel dimensions in the image label using the exact same
+        // format the live screenshot pipeline uses (CompanionManager.swift:604), so
+        // Claude's [ANNOTATE:x,y] coordinate space matches the image it sees.
+        let imageLabel = "selected region (image dimensions: \(cropPixelWidth)x\(cropPixelHeight) pixels)"
+
+        let contentBlocks: [[String: Any]] = [
+            [
+                "type": "image",
+                "source": [
+                    "type": "base64",
+                    "media_type": detectImageMediaType(for: imageData),
+                    "data": imageData.base64EncodedString()
+                ]
+            ],
+            [
+                "type": "text",
+                "text": imageLabel
+            ]
+        ]
+
+        let messages: [[String: Any]] = [
+            ["role": "user", "content": contentBlocks]
+        ]
+
+        let body: [String: Any] = [
+            "model": model,
+            "max_tokens": 700,
+            "system": Self.regionAnnotationSystemPrompt,
+            "messages": messages
+        ]
+
+        let bodyData = try JSONSerialization.data(withJSONObject: body)
+        request.httpBody = bodyData
+        let payloadMB = Double(bodyData.count) / 1_048_576.0
+        print("🌐 Claude region-annotation request: \(String(format: "%.1f", payloadMB))MB, crop \(cropPixelWidth)x\(cropPixelHeight)px")
+
+        let (data, response) = try await session.data(for: request)
+
+        guard let httpResponse = response as? HTTPURLResponse,
+              (200...299).contains(httpResponse.statusCode) else {
+            let responseString = String(data: data, encoding: .utf8) ?? "Unknown error"
+            throw NSError(
+                domain: "ClaudeAPI",
+                code: (response as? HTTPURLResponse)?.statusCode ?? -1,
+                userInfo: [NSLocalizedDescriptionKey: "API Error: \(responseString)"]
+            )
+        }
+
+        let json = try JSONSerialization.jsonObject(with: data) as? [String: Any]
+        guard let content = json?["content"] as? [[String: Any]],
+              let textBlock = content.first(where: { ($0["type"] as? String) == "text" }),
+              let responseText = textBlock["text"] as? String else {
+            throw NSError(
+                domain: "ClaudeAPI",
+                code: -1,
+                userInfo: [NSLocalizedDescriptionKey: "Invalid response format"]
+            )
+        }
+
+        return responseText
+    }
 }
