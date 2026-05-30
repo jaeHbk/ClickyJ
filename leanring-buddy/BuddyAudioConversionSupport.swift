@@ -11,7 +11,7 @@ import Foundation
 final class BuddyPCM16AudioConverter {
     private let targetAudioFormat: AVAudioFormat
     private var audioConverter: AVAudioConverter?
-    private var currentInputFormatDescription: String?
+    private var currentInputFormat: AVAudioFormat?
 
     init(targetSampleRate: Double) {
         self.targetAudioFormat = AVAudioFormat(
@@ -23,11 +23,17 @@ final class BuddyPCM16AudioConverter {
     }
 
     func convertToPCM16Data(from audioBuffer: AVAudioPCMBuffer) -> Data? {
-        let inputFormatDescription = audioBuffer.format.settings.description
+        // PERFORMANCE: detect a format change by comparing the AVAudioFormat objects
+        // directly (AVAudioFormat conforms to Equatable via isEqual). This runs on
+        // the real-time audio thread for every buffer; the previous code serialized
+        // `audioBuffer.format.settings.description` to a String on every call (a dict
+        // build + String allocation dozens of times/sec) purely to detect a change
+        // that virtually never happens mid-session.
+        let inputFormat = audioBuffer.format
 
-        if currentInputFormatDescription != inputFormatDescription {
-            audioConverter = AVAudioConverter(from: audioBuffer.format, to: targetAudioFormat)
-            currentInputFormatDescription = inputFormatDescription
+        if currentInputFormat != inputFormat {
+            audioConverter = AVAudioConverter(from: inputFormat, to: targetAudioFormat)
+            currentInputFormat = inputFormat
         }
 
         guard let audioConverter else { return nil }

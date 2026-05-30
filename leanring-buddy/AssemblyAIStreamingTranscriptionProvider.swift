@@ -293,9 +293,15 @@ private final class AssemblyAIStreamingTranscriptionSession: NSObject, BuddyStre
             }
 
             let fullTranscriptText = self.composeFullTranscript()
+
+            // PERFORMANCE: only emit when the composed transcript actually changed.
+            // AssemblyAI sends many partial Turn messages per second; previously every
+            // one recomposed AND fired onTranscriptUpdate (hopping to @MainActor and
+            // re-rendering), even when the text was identical to the last emit.
+            let transcriptChanged = fullTranscriptText != self.latestTranscriptText
             self.latestTranscriptText = fullTranscriptText
 
-            if !fullTranscriptText.isEmpty {
+            if transcriptChanged && !fullTranscriptText.isEmpty {
                 self.onTranscriptUpdate(fullTranscriptText)
             }
 

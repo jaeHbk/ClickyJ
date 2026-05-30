@@ -7,6 +7,7 @@
 //  transcription provider, and hands the final draft back to the active input bar.
 //
 
+import Accelerate
 import AppKit
 import AVFoundation
 import Combine
@@ -696,13 +697,11 @@ final class BuddyDictationManager: NSObject, ObservableObject {
         let frameCount = Int(audioBuffer.frameLength)
         guard frameCount > 0 else { return }
 
-        var summedSquares: Float = 0
-        for sampleIndex in 0..<frameCount {
-            let sample = channelSamples[sampleIndex]
-            summedSquares += sample * sample
-        }
-
-        let rootMeanSquare = sqrt(summedSquares / Float(frameCount))
+        // PERFORMANCE: compute RMS with Accelerate (vDSP_rmsqv) instead of a scalar
+        // Swift loop over every sample. This runs on the real-time audio render
+        // thread for every buffer, so the vectorized path reduces per-buffer CPU.
+        var rootMeanSquare: Float = 0
+        vDSP_rmsqv(channelSamples, 1, &rootMeanSquare, vDSP_Length(frameCount))
         let boostedLevel = min(max(rootMeanSquare * 10.2, 0), 1)
 
         DispatchQueue.main.async { [weak self] in
