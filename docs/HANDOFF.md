@@ -45,8 +45,23 @@ edit or manual "add file" step needed.
   - `feature/visualize-region` — the new feature (10 commits).
   - `fix/performance` — branched off the feature branch; the perf pass (it contains the
     feature commits + 6 perf/doc commits on top).
-- A publish remote (e.g. `origin` → `jaeHbk/<repo>`) may have been added — run
-  `git remote -v` to confirm where things were pushed.
+- **Pushed to `origin` → `https://github.com/jaeHbk/ClickyJ` (public).** All three
+  branches (`main`, `feature/visualize-region`, `fix/performance`) are on GitHub.
+  `upstream` → farzaa/clicky remains read-only; never push there.
+
+### ⚠️ History was rewritten before the first push (SHAs changed)
+GitHub push protection blocked the initial push: an **Anthropic API key inherited from
+farzaa's upstream history** (added in his "Open-source Clicky" commit, removed in a later
+upstream commit, but still live in history) sat in `leanring-buddy.xcodeproj/project.pbxproj`.
+The "allow secret" bypass was deliberately NOT used (would publish a real key to a public
+repo). Instead `git filter-repo --replace-text` scrubbed the key from ALL history,
+replacing it with `REDACTED-ANTHROPIC-KEY-removed-from-history`. Verified: zero
+`sk-ant-` occurrences in any tree across all branches; all branch tips/content otherwise
+intact. **Consequence:** every commit SHA changed from the pre-push local state. A
+pre-rewrite backup bundle of all refs is at
+`~/projects/clicky-prerewrite-backup.bundle` (restore with `git clone` from it if ever
+needed). If you have an older local clone, re-clone from `origin` rather than rebasing.
+(The key is farzaa's, not yours — it was never live in any of your commits.)
 
 ## Status by deliverable
 
