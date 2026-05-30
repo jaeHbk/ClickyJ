@@ -178,10 +178,6 @@ struct BlueCursorView: View {
     /// behavior of element pointing, where movement does not interrupt).
     @State private var isAnnotationFlightInProgress: Bool = false
 
-    /// The SwiftUI position the buddy should rest at after the annotation tour
-    /// finishes — the last annotation's callout target — so it does not snap.
-    @State private var regionVisualizationRestPosition: CGPoint = .zero
-
     // MARK: - Onboarding Video Layout
 
     private let onboardingVideoPlayerWidth: CGFloat = 330
@@ -845,6 +841,15 @@ struct BlueCursorView: View {
     /// already busy with an element-pointing flight (both paths share
     /// buddyNavigationMode + the flight timer, so they must not run together).
     private func beginRegionVisualizationFlight(_ visualization: CompanionManager.RegionVisualization) {
+        // Record the current cursor position FIRST so the post-tour >100px
+        // cursor-move dismissal (in startTrackingCursor) always compares against a
+        // fresh anchor — even on the skip paths below, where the rectangle +
+        // callouts still render statically. Without this, a skipped guided flight
+        // would leave a stale anchor from a prior element-pointing flight and could
+        // dismiss the visualization almost immediately.
+        let mouseLocation = NSEvent.mouseLocation
+        cursorPositionWhenNavigationStarted = convertScreenPointToSwiftUICoordinates(mouseLocation)
+
         // Don't fight the existing element-pointing flight. If it's mid-flight we
         // skip the guided tour — the rectangle + callouts still render statically.
         guard buddyNavigationMode == .followingCursor else {
@@ -862,11 +867,6 @@ struct BlueCursorView: View {
             print("🗺️ Region visualization: no annotations to fly to")
             return
         }
-
-        // Record cursor position so the post-tour >100px cursor-move cancel works
-        // the same way element pointing does (read in startTrackingCursor).
-        let mouseLocation = NSEvent.mouseLocation
-        cursorPositionWhenNavigationStarted = convertScreenPointToSwiftUICoordinates(mouseLocation)
 
         isAnnotationFlightInProgress = true
         isReturningToCursor = false
@@ -914,7 +914,6 @@ struct BlueCursorView: View {
 
             // Rest pointer angle while pausing on this annotation.
             self.triangleRotationDegrees = -35.0
-            self.regionVisualizationRestPosition = clampedTarget
 
             // Hold ~1.2s on this annotation, then advance to the next one.
             DispatchQueue.main.asyncAfter(deadline: .now() + 1.2) {

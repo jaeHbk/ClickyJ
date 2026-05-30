@@ -232,7 +232,7 @@ final class CompanionManager: ObservableObject {
             object: nil,
             queue: .main
         ) { [weak self] _ in
-            Task { @MainActor [weak self] in
+            Task { @MainActor in
                 self?.beginRegionSelection()
             }
         }

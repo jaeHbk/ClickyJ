@@ -20,6 +20,7 @@ All API keys live on a Cloudflare Worker proxy — nothing sensitive ships in th
 - **Screen Capture**: ScreenCaptureKit (macOS 14.2+), multi-monitor support
 - **Voice Input**: Push-to-talk via `AVAudioEngine` + pluggable transcription-provider layer. System-wide keyboard shortcut via listen-only CGEvent tap.
 - **Element Pointing**: Claude embeds `[POINT:x,y:label:screenN]` tags in responses. The overlay parses these, maps coordinates to the correct monitor, and animates the blue cursor along a bezier arc to the target.
+- **Visualize a Region**: A second shortcut (`ctrl + shift + V`) starts a drag-select. The user boxes a screen region; the app captures exactly that crop, sends it through the same Worker `/chat` proxy asking for a heading + `[ANNOTATE:x,y:label]` tags in crop-pixel space, then draws callout labels with connector lines over the region and flies the blue cursor to each annotated point (reusing the bezier-arc flight). Selection uses a temporary mouse-accepting `RegionSelectionWindow` — the deliberate inverse of the click-through cursor overlay.
 - **Concurrency**: `@MainActor` isolation, async/await throughout
 - **Analytics**: PostHog via `ClickyAnalytics.swift`
 
@@ -53,12 +54,13 @@ Worker vars: `ELEVENLABS_VOICE_ID`
 | File | Lines | Purpose |
 |------|-------|---------|
 | `leanring_buddyApp.swift` | ~89 | Menu bar app entry point. Uses `@NSApplicationDelegateAdaptor` with `CompanionAppDelegate` which creates `MenuBarPanelManager` and starts `CompanionManager`. No main window — the app lives entirely in the status bar. |
-| `CompanionManager.swift` | ~1026 | Central state machine. Owns dictation, shortcut monitoring, screen capture, Claude API, ElevenLabs TTS, and overlay management. Tracks voice state (idle/listening/processing/responding), conversation history, model selection, and cursor visibility. Coordinates the full push-to-talk → screenshot → Claude → TTS → pointing pipeline. |
+| `CompanionManager.swift` | ~1340 | Central state machine. Owns dictation, shortcut monitoring, screen capture, Claude API, ElevenLabs TTS, and overlay management. Tracks voice state (idle/listening/processing/responding), conversation history, model selection, and cursor visibility. Coordinates the full push-to-talk → screenshot → Claude → TTS → pointing pipeline, and the visualize-a-region pipeline (selection → region capture → annotations → overlay). Defines the nested `RegionAnnotation`/`RegionVisualization` types and the pure `parseRegionAnnotations`/`mapCropPixelToGlobal` helpers. |
 | `MenuBarPanelManager.swift` | ~243 | NSStatusItem + custom NSPanel lifecycle. Creates the menu bar icon, manages the floating companion panel (show/hide/position), installs click-outside-to-dismiss monitor. |
 | `CompanionPanelView.swift` | ~761 | SwiftUI panel content for the menu bar dropdown. Shows companion status, push-to-talk instructions, model picker (Sonnet/Opus), permissions UI, DM feedback button, and quit button. Dark aesthetic using `DS` design system. |
-| `OverlayWindow.swift` | ~881 | Full-screen transparent overlay hosting the blue cursor, response text, waveform, and spinner. Handles cursor animation, element pointing with bezier arcs, multi-monitor coordinate mapping, and fade-out transitions. |
+| `OverlayWindow.swift` | ~1197 | Full-screen transparent overlay hosting the blue cursor, response text, waveform, and spinner. Handles cursor animation, element pointing with bezier arcs, multi-monitor coordinate mapping, and fade-out transitions. Also renders the region-visualization overlay (region outline, heading chip, annotation callouts + connector lines via `RegionAnnotationCalloutView`) and flies the buddy through each annotation. |
 | `CompanionResponseOverlay.swift` | ~217 | SwiftUI view for the response text bubble and waveform displayed next to the cursor in the overlay. |
-| `CompanionScreenCaptureUtility.swift` | ~132 | Multi-monitor screenshot capture using ScreenCaptureKit. Returns labeled image data for each connected display. |
+| `RegionSelectionView.swift` | ~364 | Mouse-accepting rubber-band region selector for the visualize-a-region feature. `RegionSelectionWindow` (the deliberate inverse of the click-through overlay — `ignoresMouseEvents=false`, key-capable), `RegionSelectionMarqueeView` (dim + live DS-blue marquee + W×H readout), and `RegionSelectionController` (single-window lifecycle, local↔global rect conversion, Esc cancel). |
+| `CompanionScreenCaptureUtility.swift` | ~307 | Multi-monitor screenshot capture using ScreenCaptureKit. Returns labeled image data for each connected display. Also captures a single drag-selected region as a tight JPEG crop (`captureRegionAsJPEG`, returning `RegionCapture`) via `SCStreamConfiguration.sourceRect` with a CGImage-crop fallback. |
 | `BuddyDictationManager.swift` | ~866 | Push-to-talk voice pipeline. Handles microphone capture via `AVAudioEngine`, provider-aware permission checks, keyboard/button dictation sessions, transcript finalization, shortcut parsing, contextual keyterms, and live audio-level reporting for waveform feedback. |
 | `BuddyTranscriptionProvider.swift` | ~100 | Protocol surface and provider factory for voice transcription backends. Resolves provider based on `VoiceTranscriptionProvider` in Info.plist — AssemblyAI, OpenAI, or Apple Speech. |
 | `AssemblyAIStreamingTranscriptionProvider.swift` | ~478 | Streaming transcription provider. Fetches temp tokens from the Cloudflare Worker, opens an AssemblyAI v3 websocket, streams PCM16 audio, tracks turn-based transcripts, and delivers finalized text on key-up. Shares a single URLSession across all sessions. |
@@ -66,7 +68,7 @@ Worker vars: `ELEVENLABS_VOICE_ID`
 | `AppleSpeechTranscriptionProvider.swift` | ~147 | Local fallback transcription provider backed by Apple's Speech framework. |
 | `BuddyAudioConversionSupport.swift` | ~108 | Audio conversion helpers. Converts live mic buffers to PCM16 mono audio and builds WAV payloads for upload-based providers. |
 | `GlobalPushToTalkShortcutMonitor.swift` | ~132 | System-wide push-to-talk monitor. Owns the listen-only `CGEvent` tap and publishes press/release transitions. |
-| `ClaudeAPI.swift` | ~291 | Claude vision API client with streaming (SSE) and non-streaming modes. TLS warmup optimization, image MIME detection, conversation history support. |
+| `ClaudeAPI.swift` | ~386 | Claude vision API client with streaming (SSE) and non-streaming modes. TLS warmup optimization, image MIME detection, conversation history support. `analyzeRegionForAnnotations` sends a single region crop through the Worker `/chat` proxy for `[ANNOTATE:]` tags. |
 | `OpenAIAPI.swift` | ~142 | OpenAI GPT vision API client. |
 | `ElevenLabsTTSClient.swift` | ~81 | ElevenLabs TTS client. Sends text to the Worker proxy, plays back audio via `AVAudioPlayer`. Exposes `isPlaying` for transient cursor scheduling. |
 | `ElementLocationDetector.swift` | ~335 | Detects UI element locations in screenshots for cursor pointing. |
@@ -89,6 +91,8 @@ open leanring-buddy.xcodeproj
 ```
 
 **Do NOT run `xcodebuild` from the terminal** — it invalidates TCC (Transparency, Consent, and Control) permissions and the app will need to re-request screen recording, accessibility, etc.
+
+The Xcode project (`objectVersion = 77`) uses a `PBXFileSystemSynchronizedRootGroup` for `leanring-buddy/`, so source files are included by filesystem presence — **new `.swift` files dropped into `leanring-buddy/` are added to the target automatically** with no `.pbxproj` edit or manual "add file" step.
 
 ## Cloudflare Worker
 
