@@ -123,7 +123,12 @@ struct BlueCursorView: View {
         _cursorPosition = State(initialValue: CGPoint(x: localX + 35, y: localY + 25))
         _isCursorOnThisScreen = State(initialValue: screenFrame.contains(mouseLocation))
     }
-    @State private var timer: Timer?
+    /// Event-driven mouse-movement monitors that replaced the old 60fps polling
+    /// Timer (see startTrackingCursor). The global monitor fires while other apps
+    /// are active (the normal case for this background overlay); the local monitor
+    /// covers movement while our own app is active. Both are torn down in onDisappear.
+    @State private var globalMouseMovementMonitor: Any?
+    @State private var localMouseMovementMonitor: Any?
     @State private var welcomeText: String = ""
     @State private var showWelcome: Bool = true
     @State private var bubbleSize: CGSize = .zero
@@ -382,7 +387,14 @@ struct BlueCursorView: View {
             }
         }
         .onDisappear {
-            timer?.invalidate()
+            if let globalMouseMovementMonitor {
+                NSEvent.removeMonitor(globalMouseMovementMonitor)
+                self.globalMouseMovementMonitor = nil
+            }
+            if let localMouseMovementMonitor {
+                NSEvent.removeMonitor(localMouseMovementMonitor)
+                self.localMouseMovementMonitor = nil
+            }
             navigationAnimationTimer?.invalidate()
             regionVisualizationAutoClearTimer?.invalidate()
             regionVisualizationAutoClearTimer = nil
@@ -524,58 +536,89 @@ struct BlueCursorView: View {
 
     // MARK: - Cursor Tracking
 
+    /// Begins tracking the mouse to drive the buddy.
+    ///
+    /// PERFORMANCE: this used to poll `NSEvent.mouseLocation` on a 60fps repeating
+    /// Timer that ran forever (one per screen), re-rendering the overlay ~62x/sec
+    /// even when the mouse was idle or on another monitor — the app's single largest
+    /// idle battery drain. It is now event-driven: `NSEvent` mouse-movement monitors
+    /// fire `handleCursorMovement` ONLY when the mouse actually moves, so a still
+    /// cursor costs nothing. A global monitor catches movement while other apps are
+    /// active (the normal case for this background overlay); a local monitor covers
+    /// the brief windows where our own app is active. All prior per-move behavior is
+    /// preserved verbatim in `handleCursorMovement`.
     private func startTrackingCursor() {
-        timer = Timer.scheduledTimer(withTimeInterval: 0.016, repeats: true) { _ in
-            let mouseLocation = NSEvent.mouseLocation
-            self.isCursorOnThisScreen = self.screenFrame.contains(mouseLocation)
+        // Seed the on-screen flag once now; subsequent updates are movement-driven.
+        isCursorOnThisScreen = screenFrame.contains(NSEvent.mouseLocation)
 
-            // Region visualization dismissal: once the guided annotation tour has
-            // finished (isAnnotationFlightInProgress == false) but the rectangle +
-            // callouts are still showing, a >100px cursor move clears it — same
-            // gesture and threshold as the element-pointing return-flight cancel below.
-            if !self.isAnnotationFlightInProgress,
-               let activeVisualization = self.companionManager.activeRegionVisualization,
-               self.regionVisualizationIsOnThisScreen(activeVisualization) {
-                let currentMouseInSwiftUI = self.convertScreenPointToSwiftUICoordinates(mouseLocation)
-                let distanceFromFlightStart = hypot(
-                    currentMouseInSwiftUI.x - self.cursorPositionWhenNavigationStarted.x,
-                    currentMouseInSwiftUI.y - self.cursorPositionWhenNavigationStarted.y
-                )
-                if distanceFromFlightStart > 100 {
-                    print("🗺️ Region visualization: cursor moved >100px, clearing")
-                    self.regionVisualizationAutoClearTimer?.invalidate()
-                    self.regionVisualizationAutoClearTimer = nil
-                    self.companionManager.clearRegionVisualization()
-                }
-            }
+        let movementEventMask: NSEvent.EventTypeMask = [
+            .mouseMoved, .leftMouseDragged, .rightMouseDragged, .otherMouseDragged
+        ]
 
-            // During forward flight or pointing, the buddy is NOT interrupted by
-            // mouse movement — it completes its full animation and return flight.
-            // Only during the RETURN flight do we allow cursor movement to cancel
-            // (so the buddy snaps to following if the user moves while it's flying back).
-            if self.buddyNavigationMode == .navigatingToTarget && self.isReturningToCursor {
-                let currentMouseInSwiftUI = self.convertScreenPointToSwiftUICoordinates(mouseLocation)
-                let distanceFromNavigationStart = hypot(
-                    currentMouseInSwiftUI.x - self.cursorPositionWhenNavigationStarted.x,
-                    currentMouseInSwiftUI.y - self.cursorPositionWhenNavigationStarted.y
-                )
-                if distanceFromNavigationStart > 100 {
-                    cancelNavigationAndResumeFollowing()
-                }
-                return
-            }
-
-            // During forward navigation or pointing, just skip cursor tracking
-            if self.buddyNavigationMode != .followingCursor {
-                return
-            }
-
-            // Normal cursor following
-            let swiftUIPosition = self.convertScreenPointToSwiftUICoordinates(mouseLocation)
-            let buddyX = swiftUIPosition.x + 35
-            let buddyY = swiftUIPosition.y + 25
-            self.cursorPosition = CGPoint(x: buddyX, y: buddyY)
+        globalMouseMovementMonitor = NSEvent.addGlobalMonitorForEvents(matching: movementEventMask) { [self] _ in
+            // Global monitors don't carry our window's coordinate context, so read
+            // the authoritative global mouse location (same value the old timer used).
+            handleCursorMovement(mouseLocation: NSEvent.mouseLocation)
         }
+
+        localMouseMovementMonitor = NSEvent.addLocalMonitorForEvents(matching: movementEventMask) { [self] event in
+            handleCursorMovement(mouseLocation: NSEvent.mouseLocation)
+            return event
+        }
+    }
+
+    /// Per-movement work, formerly the body of the 60fps tracking Timer. Logic is
+    /// unchanged: update the on-screen flag, handle region-visualization dismissal,
+    /// handle return-flight cancellation, and (when following) move the buddy.
+    private func handleCursorMovement(mouseLocation: CGPoint) {
+        self.isCursorOnThisScreen = self.screenFrame.contains(mouseLocation)
+
+        // Region visualization dismissal: once the guided annotation tour has
+        // finished (isAnnotationFlightInProgress == false) but the rectangle +
+        // callouts are still showing, a >100px cursor move clears it — same
+        // gesture and threshold as the element-pointing return-flight cancel below.
+        if !self.isAnnotationFlightInProgress,
+           let activeVisualization = self.companionManager.activeRegionVisualization,
+           self.regionVisualizationIsOnThisScreen(activeVisualization) {
+            let currentMouseInSwiftUI = self.convertScreenPointToSwiftUICoordinates(mouseLocation)
+            let distanceFromFlightStart = hypot(
+                currentMouseInSwiftUI.x - self.cursorPositionWhenNavigationStarted.x,
+                currentMouseInSwiftUI.y - self.cursorPositionWhenNavigationStarted.y
+            )
+            if distanceFromFlightStart > 100 {
+                print("🗺️ Region visualization: cursor moved >100px, clearing")
+                self.regionVisualizationAutoClearTimer?.invalidate()
+                self.regionVisualizationAutoClearTimer = nil
+                self.companionManager.clearRegionVisualization()
+            }
+        }
+
+        // During forward flight or pointing, the buddy is NOT interrupted by
+        // mouse movement — it completes its full animation and return flight.
+        // Only during the RETURN flight do we allow cursor movement to cancel
+        // (so the buddy snaps to following if the user moves while it's flying back).
+        if self.buddyNavigationMode == .navigatingToTarget && self.isReturningToCursor {
+            let currentMouseInSwiftUI = self.convertScreenPointToSwiftUICoordinates(mouseLocation)
+            let distanceFromNavigationStart = hypot(
+                currentMouseInSwiftUI.x - self.cursorPositionWhenNavigationStarted.x,
+                currentMouseInSwiftUI.y - self.cursorPositionWhenNavigationStarted.y
+            )
+            if distanceFromNavigationStart > 100 {
+                cancelNavigationAndResumeFollowing()
+            }
+            return
+        }
+
+        // During forward navigation or pointing, just skip cursor tracking
+        if self.buddyNavigationMode != .followingCursor {
+            return
+        }
+
+        // Normal cursor following
+        let swiftUIPosition = self.convertScreenPointToSwiftUICoordinates(mouseLocation)
+        let buddyX = swiftUIPosition.x + 35
+        let buddyY = swiftUIPosition.y + 25
+        self.cursorPosition = CGPoint(x: buddyX, y: buddyY)
     }
 
     /// Converts a macOS screen point (AppKit, bottom-left origin) to SwiftUI
