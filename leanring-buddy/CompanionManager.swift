@@ -55,7 +55,10 @@ final class CompanionManager: ObservableObject {
 
     @Published private(set) var voiceState: CompanionVoiceState = .idle
     @Published private(set) var lastTranscript: String?
-    @Published private(set) var currentAudioPowerLevel: CGFloat = 0
+    // NOTE: the live audio power level is intentionally NOT republished here.
+    // The overlay waveform observes buddyDictationManager.$currentAudioPowerLevel
+    // directly so the ~45x/sec mic updates don't re-render the whole menu-bar panel
+    // (which observes this object). See BlueCursorWaveformView.
     @Published private(set) var hasAccessibilityPermission = false
     @Published private(set) var hasScreenRecordingPermission = false
     @Published private(set) var hasMicrophonePermission = false
@@ -130,7 +133,6 @@ final class CompanionManager: ObservableObject {
 
     private var shortcutTransitionCancellable: AnyCancellable?
     private var voiceStateCancellable: AnyCancellable?
-    private var audioPowerCancellable: AnyCancellable?
     private var accessibilityCheckTimer: Timer?
     private var pendingKeyboardShortcutStartTask: Task<Void, Never>?
     /// Scheduled hide for transient cursor mode — cancelled if the user
@@ -221,7 +223,6 @@ final class CompanionManager: ObservableObject {
         print("🔑 Clicky start — accessibility: \(hasAccessibilityPermission), screen: \(hasScreenRecordingPermission), mic: \(hasMicrophonePermission), screenContent: \(hasScreenContentPermission), onboarded: \(hasCompletedOnboarding)")
         startPermissionPolling()
         bindVoiceStateObservation()
-        bindAudioPowerLevel()
         bindShortcutTransitions()
         // Observe the panel's "Visualize a region" row so it triggers the same
         // flow as the ⌃⇧V hotkey. The notification arrives on the main queue;
@@ -355,7 +356,6 @@ final class CompanionManager: ObservableObject {
         activeRegionVisualization = nil
         shortcutTransitionCancellable?.cancel()
         voiceStateCancellable?.cancel()
-        audioPowerCancellable?.cancel()
         accessibilityCheckTimer?.invalidate()
         accessibilityCheckTimer = nil
         if let startRegionVisualizationObserver {
@@ -479,14 +479,6 @@ final class CompanionManager: ObservableObject {
                 self?.refreshAllPermissions()
             }
         }
-    }
-
-    private func bindAudioPowerLevel() {
-        audioPowerCancellable = buddyDictationManager.$currentAudioPowerLevel
-            .receive(on: DispatchQueue.main)
-            .sink { [weak self] powerLevel in
-                self?.currentAudioPowerLevel = powerLevel
-            }
     }
 
     private func bindVoiceStateObservation() {

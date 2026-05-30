@@ -341,7 +341,7 @@ struct BlueCursorView: View {
                 )
 
             // Blue waveform — replaces the triangle while listening
-            BlueCursorWaveformView(audioPowerLevel: companionManager.currentAudioPowerLevel)
+            BlueCursorWaveformView(buddyDictationManager: companionManager.buddyDictationManager)
                 .opacity(buddyIsVisibleOnThisScreen && companionManager.voiceState == .listening ? cursorOpacity : 0)
                 .position(cursorPosition)
                 .animation(.spring(response: 0.2, dampingFraction: 0.6, blendDuration: 0), value: cursorPosition)
@@ -1066,7 +1066,15 @@ private struct RegionAnnotationCalloutView: View {
 /// A small blue waveform that replaces the triangle cursor while
 /// the user is holding the push-to-talk shortcut and speaking.
 private struct BlueCursorWaveformView: View {
-    let audioPowerLevel: CGFloat
+    /// PERFORMANCE: the waveform observes the dictation manager DIRECTLY rather
+    /// than reading a copy republished on CompanionManager. The mic delivers a
+    /// power-level update ~45x/sec while recording; routing it through
+    /// CompanionManager (which the whole menu-bar panel observes) re-rendered the
+    /// entire panel body on every tick. Observing buddyDictationManager here scopes
+    /// those re-renders to just this small view. The displayed value is identical.
+    @ObservedObject var buddyDictationManager: BuddyDictationManager
+
+    private var audioPowerLevel: CGFloat { buddyDictationManager.currentAudioPowerLevel }
 
     private let barCount = 5
     private let listeningBarProfile: [CGFloat] = [0.4, 0.7, 1.0, 0.7, 0.4]
