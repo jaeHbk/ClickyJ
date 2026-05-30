@@ -862,14 +862,13 @@ final class CompanionManager: ObservableObject {
                     (userPlaceholder: entry.userTranscript, assistantResponse: entry.assistantResponse)
                 }
 
+                // No streaming text display — the spinner stays until TTS plays, so
+                // onTextChunk is omitted (nil) and the per-token main-actor hop is skipped.
                 let (fullResponseText, _) = try await claudeAPI.analyzeImageStreaming(
                     images: labeledImages,
                     systemPrompt: Self.companionVoiceResponseSystemPrompt,
                     conversationHistory: historyForAPI,
-                    userPrompt: transcript,
-                    onTextChunk: { _ in
-                        // No streaming text display — spinner stays until TTS plays
-                    }
+                    userPrompt: transcript
                 )
 
                 guard !Task.isCancelled else { return }
@@ -1339,8 +1338,7 @@ final class CompanionManager: ObservableObject {
                 let (fullResponseText, _) = try await claudeAPI.analyzeImageStreaming(
                     images: labeledImages,
                     systemPrompt: Self.onboardingDemoSystemPrompt,
-                    userPrompt: "look around my screen and find something interesting to point at",
-                    onTextChunk: { _ in }
+                    userPrompt: "look around my screen and find something interesting to point at"
                 )
 
                 let parseResult = Self.parsePointingCoordinates(from: fullResponseText)

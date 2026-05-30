@@ -96,14 +96,21 @@ class ClaudeAPI {
     }
 
     /// Send a vision request to Claude with streaming.
-    /// Calls `onTextChunk` on the main actor each time new text arrives so the UI updates progressively.
+    ///
+    /// `onTextChunk`, if provided, is called on the main actor with each INCREMENTAL
+    /// text delta as it arrives (not the full accumulated string), so a UI consumer
+    /// can append progressively. PERFORMANCE: it is optional and defaults to nil; when
+    /// nil (the current live pipeline, which holds the spinner until TTS and displays
+    /// no streaming text) the per-token main-actor hop is skipped entirely. Passing the
+    /// delta instead of the whole accumulated string also avoids the previous O(n^2)
+    /// re-copy of the full response on every token.
     /// Returns the full accumulated text and total duration when the stream completes.
     func analyzeImageStreaming(
         images: [(data: Data, label: String)],
         systemPrompt: String,
         conversationHistory: [(userPlaceholder: String, assistantResponse: String)] = [],
         userPrompt: String,
-        onTextChunk: @MainActor @Sendable (String) -> Void
+        onTextChunk: (@MainActor @Sendable (String) -> Void)? = nil
     ) async throws -> (text: String, duration: TimeInterval) {
         let startTime = Date()
 
@@ -201,9 +208,13 @@ class ClaudeAPI {
                deltaType == "text_delta",
                let textChunk = delta["text"] as? String {
                 accumulatedResponseText += textChunk
-                // Send the accumulated text so far to the UI for progressive rendering
-                let currentAccumulatedText = accumulatedResponseText
-                await onTextChunk(currentAccumulatedText)
+                // Forward only the incremental delta to a UI consumer (it can append).
+                // When no consumer is attached (the live pipeline passes nil), skip the
+                // main-actor hop entirely — avoids serializing the network loop against
+                // the main thread per token and the O(n^2) full-string re-copy.
+                if let onTextChunk {
+                    await onTextChunk(textChunk)
+                }
             }
         }
 

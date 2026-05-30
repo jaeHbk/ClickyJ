@@ -114,8 +114,15 @@ enum CompanionScreenCaptureUtility {
                 configuration: configuration
             )
 
-            guard let jpegData = NSBitmapImageRep(cgImage: cgImage)
-                    .representation(using: .jpeg, properties: [.compressionFactor: 0.8]) else {
+            // PERFORMANCE: JPEG-encode off the main actor. NSBitmapImageRep encoding
+            // is CPU-heavy and previously ran synchronously on @MainActor once per
+            // display, blocking UI during every push-to-talk turn. Task.detached
+            // moves it off-main; nil result (encode failure) skips this display.
+            let jpegData: Data? = await Task.detached(priority: .userInitiated) {
+                NSBitmapImageRep(cgImage: cgImage)
+                    .representation(using: .jpeg, properties: [.compressionFactor: 0.8])
+            }.value
+            guard let jpegData else {
                 continue
             }
 
