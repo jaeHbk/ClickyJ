@@ -134,6 +134,9 @@ final class CompanionManager: ObservableObject {
     private var shortcutTransitionCancellable: AnyCancellable?
     private var voiceStateCancellable: AnyCancellable?
     private var accessibilityCheckTimer: Timer?
+    /// Observer that refreshes permissions on app activation and re-arms the poll
+    /// if any are still missing — so we don't poll forever at idle. Removed in stop().
+    private var permissionActivationObserver: NSObjectProtocol?
     private var pendingKeyboardShortcutStartTask: Task<Void, Never>?
     /// Scheduled hide for transient cursor mode — cancelled if the user
     /// speaks again before the delay elapses.
@@ -222,6 +225,7 @@ final class CompanionManager: ObservableObject {
         refreshAllPermissions()
         print("🔑 Clicky start — accessibility: \(hasAccessibilityPermission), screen: \(hasScreenRecordingPermission), mic: \(hasMicrophonePermission), screenContent: \(hasScreenContentPermission), onboarded: \(hasCompletedOnboarding)")
         startPermissionPolling()
+        registerPermissionActivationRefresh()
         bindVoiceStateObservation()
         bindShortcutTransitions()
         // Observe the panel's "Visualize a region" row so it triggers the same
@@ -358,6 +362,10 @@ final class CompanionManager: ObservableObject {
         voiceStateCancellable?.cancel()
         accessibilityCheckTimer?.invalidate()
         accessibilityCheckTimer = nil
+        if let permissionActivationObserver {
+            NotificationCenter.default.removeObserver(permissionActivationObserver)
+            self.permissionActivationObserver = nil
+        }
         if let startRegionVisualizationObserver {
             NotificationCenter.default.removeObserver(startRegionVisualizationObserver)
             self.startRegionVisualizationObserver = nil
@@ -470,13 +478,53 @@ final class CompanionManager: ObservableObject {
         }
     }
 
-    /// Polls all permissions frequently so the UI updates live after the
-    /// user grants them in System Settings. Screen Recording is the exception —
-    /// macOS requires an app restart for that one to take effect.
+    /// Polls all permissions so the UI updates live while the user grants them in
+    /// System Settings. PERFORMANCE: this timer used to run every 1.5s for the app's
+    /// ENTIRE lifetime (only stopped in stop()), waking the main thread ~40x/min
+    /// forever even when fully onboarded — a classic menu-bar battery anti-pattern.
+    /// Now the poll runs ONLY while permissions are still missing: it stops itself
+    /// once everything is granted, and an app-activation observer re-arms it if the
+    /// user returns with a permission still pending. The live-update UX during
+    /// onboarding (when the app is active) is preserved; the steady-state idle poll
+    /// is eliminated.
     private func startPermissionPolling() {
+        // If everything is already granted, don't start a poll at all.
+        guard !allPermissionsGranted else { return }
+        guard accessibilityCheckTimer == nil else { return }
+
         accessibilityCheckTimer = Timer.scheduledTimer(withTimeInterval: 1.5, repeats: true) { [weak self] _ in
             Task { @MainActor [weak self] in
-                self?.refreshAllPermissions()
+                guard let self else { return }
+                self.refreshAllPermissions()
+                // Once all permissions are granted there is nothing left to detect,
+                // so stop polling — the activation observer will re-arm if needed.
+                if self.allPermissionsGranted {
+                    self.stopPermissionPolling()
+                }
+            }
+        }
+    }
+
+    private func stopPermissionPolling() {
+        accessibilityCheckTimer?.invalidate()
+        accessibilityCheckTimer = nil
+    }
+
+    /// On app activation, refresh permissions once and re-arm the poll if any are
+    /// still missing. This replaces the forever-poll for the common case where the
+    /// user grants a permission in System Settings and switches back to the app.
+    private func registerPermissionActivationRefresh() {
+        permissionActivationObserver = NotificationCenter.default.addObserver(
+            forName: NSApplication.didBecomeActiveNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            Task { @MainActor [weak self] in
+                guard let self else { return }
+                self.refreshAllPermissions()
+                if !self.allPermissionsGranted {
+                    self.startPermissionPolling()
+                }
             }
         }
     }

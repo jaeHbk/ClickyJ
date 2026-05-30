@@ -340,15 +340,23 @@ struct BlueCursorView: View {
                     value: triangleRotationDegrees
                 )
 
-            // Blue waveform — replaces the triangle while listening
-            BlueCursorWaveformView(buddyDictationManager: companionManager.buddyDictationManager)
+            // Blue waveform — replaces the triangle while listening.
+            // PERFORMANCE: the view stays in the tree (opacity cross-fade avoids the
+            // cursor "pop"), but its TimelineView animation is PAUSED unless actually
+            // listening, so the ~36fps bar recomputation doesn't run at idle.
+            BlueCursorWaveformView(
+                buddyDictationManager: companionManager.buddyDictationManager,
+                isListening: companionManager.voiceState == .listening
+            )
                 .opacity(buddyIsVisibleOnThisScreen && companionManager.voiceState == .listening ? cursorOpacity : 0)
                 .position(cursorPosition)
                 .animation(.spring(response: 0.2, dampingFraction: 0.6, blendDuration: 0), value: cursorPosition)
                 .animation(.easeIn(duration: 0.15), value: companionManager.voiceState)
 
-            // Blue spinner — shown while the AI is processing (transcription + Claude + waiting for TTS)
-            BlueCursorSpinnerView()
+            // Blue spinner — shown while the AI is processing (transcription + Claude + waiting for TTS).
+            // PERFORMANCE: stays in the tree (cross-fade), but the repeatForever
+            // rotation only runs while processing so it doesn't spin invisibly at idle.
+            BlueCursorSpinnerView(isProcessing: companionManager.voiceState == .processing)
                 .opacity(buddyIsVisibleOnThisScreen && companionManager.voiceState == .processing ? cursorOpacity : 0)
                 .position(cursorPosition)
                 .animation(.spring(response: 0.2, dampingFraction: 0.6, blendDuration: 0), value: cursorPosition)
@@ -1074,13 +1082,18 @@ private struct BlueCursorWaveformView: View {
     /// those re-renders to just this small view. The displayed value is identical.
     @ObservedObject var buddyDictationManager: BuddyDictationManager
 
+    /// Whether the user is currently speaking (push-to-talk held). When false,
+    /// the TimelineView schedule is PAUSED so the ~36fps bar animation doesn't run
+    /// while the waveform is invisible (opacity 0) at idle.
+    let isListening: Bool
+
     private var audioPowerLevel: CGFloat { buddyDictationManager.currentAudioPowerLevel }
 
     private let barCount = 5
     private let listeningBarProfile: [CGFloat] = [0.4, 0.7, 1.0, 0.7, 0.4]
 
     var body: some View {
-        TimelineView(.animation(minimumInterval: 1.0 / 36.0)) { timelineContext in
+        TimelineView(.animation(minimumInterval: 1.0 / 36.0, paused: !isListening)) { timelineContext in
             HStack(alignment: .center, spacing: 2) {
                 ForEach(0..<barCount, id: \.self) { barIndex in
                     RoundedRectangle(cornerRadius: 1.5, style: .continuous)
@@ -1114,6 +1127,11 @@ private struct BlueCursorWaveformView: View {
 /// A small blue spinning indicator that replaces the triangle cursor
 /// while the AI is processing a voice input.
 private struct BlueCursorSpinnerView: View {
+    /// Whether the AI is currently processing. The repeatForever rotation runs ONLY
+    /// while this is true, so the spinner doesn't keep animating invisibly at idle
+    /// (the view stays in the tree for an opacity cross-fade; see the ZStack).
+    let isProcessing: Bool
+
     @State private var isSpinning = false
 
     var body: some View {
@@ -1133,10 +1151,26 @@ private struct BlueCursorSpinnerView: View {
             .rotationEffect(.degrees(isSpinning ? 360 : 0))
             .shadow(color: DS.Colors.overlayCursorBlue.opacity(0.6), radius: 6, x: 0, y: 0)
             .onAppear {
-                withAnimation(.linear(duration: 0.8).repeatForever(autoreverses: false)) {
-                    isSpinning = true
+                if isProcessing { startSpinning() }
+            }
+            .onChange(of: isProcessing) { nowProcessing in
+                if nowProcessing {
+                    startSpinning()
+                } else {
+                    // Stop the repeating animation cleanly so it isn't left running
+                    // forever once the spinner fades out.
+                    withAnimation(.linear(duration: 0.2)) {
+                        isSpinning = false
+                    }
                 }
             }
+    }
+
+    private func startSpinning() {
+        isSpinning = false
+        withAnimation(.linear(duration: 0.8).repeatForever(autoreverses: false)) {
+            isSpinning = true
+        }
     }
 }
 
