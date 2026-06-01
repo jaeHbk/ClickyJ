@@ -13,7 +13,7 @@ equivalents without significantly degrading features or performance.
 
 | Swap | Capability | Target | Code status | Xcode validation |
 |---|---|---|---|---|
-| Restart | repo reset | clean import of `farzaa/clicky@a80fa80` | ✅ done (local) | n/a |
+| Restart | repo reset | clean import of `farzaa/clicky@a80fa80` | ✅ done (pushed) | n/a |
 | Docs | spec/plan/progress | written | ✅ done | n/a |
 | A | Analytics | strip PostHog | ⬜ not started | ⏳ XCODE |
 | B | Speech-to-text | WhisperKit | ⬜ not started | ⏳ XCODE |
@@ -34,9 +34,12 @@ equivalents without significantly degrading features or performance.
 - Mapped the full paid-API surface against pristine upstream source (exact files,
   signatures, `[POINT]` parser + system prompt).
 - Wrote design spec, PLAN.md, PROGRESS.md.
-- **Pending:** destructive remote replace of ClickyJ `main` (token lacks
-  `delete_repo`, so force-replace + stray-branch delete instead of repo delete) —
-  requires explicit confirmation.
+- **Remote reset DONE:** force-replaced ClickyJ `main` (`d2899fa` → `34fcb60`) with
+  clean history; deleted stray remote branches `feature/visualize-region` +
+  `fix/performance`. Token lacks `delete_repo`, so force-replace was used instead of
+  deleting the repo. Old refs fully recoverable from
+  `~/projects/clickyJ-backups-20260601/clickyJ-allrefs.bundle`. Repo description
+  updated to the new open-source mission. ClickyJ now: single `main`, 2 commits.
 
 ---
 
