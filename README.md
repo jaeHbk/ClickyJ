@@ -1,162 +1,85 @@
-Update: April 27, 2026.
+# ClickyJ
 
-Hi there! I'm Farza, the guy that made Clicky.
-
-The existing codebase remains open source. Tinker with it, make it yours, start a company out of it, do whatever you want I don't mind. But, for all the new stuff I'm hacking on, gonna keep it private. To get the latest Clicky, you can go [here](https://www.heyclicky.com/).
-
-I also tweeted about this [here](https://x.com/FarzaTV/status/2043402737828962489).
-
-Go crazy with this repo!! It's an MIT license.
-
-# Hi, this is Clicky.
-It's an AI teacher that lives as a buddy next to your cursor. It can see your screen, talk to you, and even point at stuff. Kinda like having a real teacher next to you.
-
-Download it [here](https://www.clicky.so/) for free.
-
-Here's the [original tweet](https://x.com/FarzaTV/status/2041314633978659092) that kinda blew up for a demo for more context.
+ClickyJ is an open-source restart of [Clicky](https://github.com/farzaa/clicky) — an AI buddy that lives next to your cursor on macOS. It can see your screen, talk to you, and point at things. Push-to-talk (Control + Option), it transcribes your voice, looks at a screenshot, answers out loud, and flies a little blue cursor to whatever it's referring to.
 
 ![Clicky — an ai buddy that lives on your mac](clicky-demo.gif)
 
-This is the open-source version of Clicky for those that want to hack on it, build their own features, or just see how it works under the hood.
+## What makes ClickyJ different
 
-## Get started with Claude Code
+The goal of this fork is simple: **replace every paid API with an open-source or free-hosted equivalent, without losing features or performance.** Speech and voice now run fully on your Mac; only the vision/chat call leaves the device, and it uses a free tier.
 
-The fastest way to get this running is with [Claude Code](https://docs.anthropic.com/en/docs/claude-code).
+| Capability | Original Clicky (paid) | ClickyJ |
+|---|---|---|
+| Vision + chat | Claude (Anthropic) | **Google Gemini** `gemini-2.5-flash` (free tier) |
+| Speech-to-text | AssemblyAI + OpenAI | **WhisperKit** — on-device CoreML (Apple Speech fallback) |
+| Text-to-speech | ElevenLabs | **Kokoro** — local sidecar (Apple voice fallback) |
+| Analytics | PostHog | **Removed** — no telemetry |
 
-Once you get Claude running, paste this:
+The element-pointing feature (`[POINT]` tags) is preserved; it uses Gemini's native spatial grounding.
 
-```
-Hi Claude.
+## Status
 
-Clone https://github.com/farzaa/clicky.git into my current directory.
+**Code-complete; pending build verification on a machine with Xcode.** All four migrations are done and merged. Logic that can be checked without Xcode has been (worker typecheck, `[POINT]` coordinate conversion, audio encoding). Compile/run plus accuracy and latency checks remain — see `docs/migration/PROGRESS.md` for the validation checklist.
 
-Then read the CLAUDE.md. I want to get Clicky running locally on my Mac.
-
-Help me set up everything — the Cloudflare Worker with my own API keys, the proxy URLs, and getting it building in Xcode. Walk me through it.
-```
-
-That's it. It'll clone the repo, read the docs, and walk you through the whole setup. Once you're running you can just keep talking to it — build features, fix bugs, whatever. Go crazy.
-
-## Manual setup
-
-If you want to do it yourself, here's the deal.
+## Setup
 
 ### Prerequisites
+- macOS 14+ and Xcode 16+
+- A free [Google AI Studio](https://aistudio.google.com/app/apikey) API key (for vision)
+- A [Cloudflare](https://cloudflare.com) account (free tier) for the proxy
+- Node.js 18+ and Python 3.10–3.12
 
-- macOS 14.2+ (for ScreenCaptureKit)
-- Xcode 15+
-- Node.js 18+ (for the Cloudflare Worker)
-- A [Cloudflare](https://cloudflare.com) account (free tier works)
-- API keys for: [Anthropic](https://console.anthropic.com), [AssemblyAI](https://www.assemblyai.com), [ElevenLabs](https://elevenlabs.io)
-
-### 1. Set up the Cloudflare Worker
-
-The Worker is a tiny proxy that holds your API keys. The app talks to the Worker, the Worker talks to the APIs. This way your keys never ship in the app binary.
-
+### 1. Vision proxy (Cloudflare Worker)
+The Worker holds your Gemini key so it never ships in the app.
 ```bash
 cd worker
 npm install
+npx wrangler secret put GEMINI_API_KEY   # paste your AI Studio key
+npx wrangler deploy                       # prints your worker URL
 ```
+Then set that URL as `workerBaseURL` in `leanring-buddy/CompanionManager.swift`
+(replace `your-worker-name.your-subdomain.workers.dev`). For local dev,
+`npx wrangler dev` with a `worker/.dev.vars` file containing `GEMINI_API_KEY=...`.
 
-Now add your secrets. Wrangler will prompt you to paste each one:
-
+### 2. Text-to-speech sidecar (Kokoro)
+Runs locally; downloads the model on first launch.
 ```bash
-npx wrangler secret put ANTHROPIC_API_KEY
-npx wrangler secret put ASSEMBLYAI_API_KEY
-npx wrangler secret put ELEVENLABS_API_KEY
+cd tts-sidecar
+./setup_and_run.sh        # venv + deps + model, serves on 127.0.0.1:8757
 ```
+Leave it running while you use Clicky. If it isn't running, the app falls back
+to Apple's built-in voice automatically. Details in `tts-sidecar/README.md`.
 
-For the ElevenLabs voice ID, open `wrangler.toml` and set it there (it's not sensitive):
-
-```toml
-[vars]
-ELEVENLABS_VOICE_ID = "your-voice-id-here"
-```
-
-Deploy it:
-
-```bash
-npx wrangler deploy
-```
-
-It'll give you a URL like `https://your-worker-name.your-subdomain.workers.dev`. Copy that.
-
-### 2. Run the Worker locally (for development)
-
-If you want to test changes to the Worker without deploying:
-
-```bash
-cd worker
-npx wrangler dev
-```
-
-This starts a local server (usually `http://localhost:8787`) that behaves exactly like the deployed Worker. You'll need to create a `.dev.vars` file in the `worker/` directory with your keys:
-
-```
-ANTHROPIC_API_KEY=sk-ant-...
-ASSEMBLYAI_API_KEY=...
-ELEVENLABS_API_KEY=...
-ELEVENLABS_VOICE_ID=...
-```
-
-Then update the proxy URLs in the Swift code to point to `http://localhost:8787` instead of the deployed Worker URL while developing. Grep for `clicky-proxy` to find them all.
-
-### 3. Update the proxy URLs in the app
-
-The app has the Worker URL hardcoded in a few places. Search for `your-worker-name.your-subdomain.workers.dev` and replace it with your Worker URL:
-
-```bash
-grep -r "clicky-proxy" leanring-buddy/
-```
-
-You'll find it in:
-- `CompanionManager.swift` — Claude chat + ElevenLabs TTS
-- `AssemblyAIStreamingTranscriptionProvider.swift` — AssemblyAI token endpoint
-
-### 4. Open in Xcode and run
-
+### 3. Build and run
 ```bash
 open leanring-buddy.xcodeproj
 ```
+- Xcode resolves the Swift packages (Sparkle + WhisperKit) on first open.
+- Pick the `leanring-buddy` scheme (the typo is intentional/legacy), set your signing team, and press **Cmd + R**.
+- The app lives in the menu bar (no dock icon). Speech-to-text downloads its model on first run.
 
-In Xcode:
-1. Select the `leanring-buddy` scheme (yes, the typo is intentional, long story)
-2. Set your signing team under Signing & Capabilities
-3. Hit **Cmd + R** to build and run
+Grant the permissions it requests: **Microphone**, **Accessibility** (global hotkey), **Screen Recording**, and **Screen Content**.
 
-The app will appear in your menu bar (not the dock). Click the icon to open the panel, grant the permissions it asks for, and you're good.
+## Architecture (short version)
 
-### Permissions the app needs
-
-- **Microphone** — for push-to-talk voice capture
-- **Accessibility** — for the global keyboard shortcut (Control + Option)
-- **Screen Recording** — for taking screenshots when you use the hotkey
-- **Screen Content** — for ScreenCaptureKit access
-
-## Architecture
-
-If you want the full technical breakdown, read `CLAUDE.md`. But here's the short version:
-
-**Menu bar app** (no dock icon) with two `NSPanel` windows — one for the control panel dropdown, one for the full-screen transparent cursor overlay. Push-to-talk streams audio over a websocket to AssemblyAI, sends the transcript + screenshot to Claude via streaming SSE, and plays the response through ElevenLabs TTS. Claude can embed `[POINT:x,y:label:screenN]` tags in its responses to make the cursor fly to specific UI elements across multiple monitors. All three APIs are proxied through a Cloudflare Worker.
-
-## Project structure
+Menu-bar app (no dock icon) with two `NSPanel`s — the control-panel dropdown and a full-screen transparent cursor overlay. Push-to-talk captures audio, **WhisperKit** transcribes it on-device, the transcript + a screenshot go to **Gemini** over streaming SSE (via the Worker), and the reply is spoken by the local **Kokoro** sidecar. Gemini embeds `[POINT:y,x:label:screenN]` tags (normalized 0–1000) that the cursor flies to across monitors. Full breakdown in `CLAUDE.md` / `AGENTS.md`.
 
 ```
-leanring-buddy/          # Swift source (yes, the typo stays)
-  CompanionManager.swift    # Central state machine
-  CompanionPanelView.swift  # Menu bar panel UI
-  ClaudeAPI.swift           # Claude streaming client
-  ElevenLabsTTSClient.swift # Text-to-speech playback
-  OverlayWindow.swift       # Blue cursor overlay
-  AssemblyAI*.swift         # Real-time transcription
-  BuddyDictation*.swift     # Push-to-talk pipeline
-worker/                  # Cloudflare Worker proxy
-  src/index.ts              # Three routes: /chat, /tts, /transcribe-token
-CLAUDE.md                # Full architecture doc (agents read this)
+leanring-buddy/                          # Swift source
+  CompanionManager.swift                   # Central state machine + [POINT] coordinate mapping
+  GeminiAPI.swift                          # Gemini streaming vision client
+  WhisperKitTranscriptionProvider.swift    # On-device speech-to-text
+  KokoroTTSClient.swift                    # Local TTS client (+ Apple fallback)
+  OverlayWindow.swift                      # Blue cursor overlay
+worker/src/index.ts                      # Cloudflare Worker — single /chat route (Gemini)
+tts-sidecar/                             # Local Kokoro TTS server
+docs/migration/                          # Migration plan, progress + tradeoffs
 ```
 
-## Contributing
+## Credit
 
-PRs welcome. If you're using Claude Code, it already knows the codebase — just tell it what you want to build and point it at `CLAUDE.md`.
+ClickyJ is a fork of **[Clicky](https://github.com/farzaa/clicky) by [Farza](https://x.com/farzatv)**, released under the MIT license. The original app, design, and the clever cursor-pointing idea are all his — this fork only swaps the backing services for open-source ones. Huge thanks to Farza for open-sourcing it. The latest official Clicky lives at [heyclicky.com](https://www.heyclicky.com/).
 
-Got feedback? DM me on X [@farzatv](https://x.com/farzatv).
+## License
+
+MIT (inherited from upstream). See `LICENSE`.
