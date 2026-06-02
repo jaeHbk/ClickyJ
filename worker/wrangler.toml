@@ -1,6 +1,6 @@
-name = "clicky-proxy"
+name = "clickyj-proxy"
 main = "src/index.ts"
 compatibility_date = "2024-01-01"
 
-[vars]
-ELEVENLABS_VOICE_ID = "kPzsL2i3teMYv0FxEYQ6"
+# Secret (set with: npx wrangler secret put GEMINI_API_KEY):
+#   GEMINI_API_KEY — Google AI Studio API key (free tier)

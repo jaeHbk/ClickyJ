@@ -71,8 +71,8 @@ final class CompanionManager: ObservableObject {
     /// through this so keys never ship in the app binary.
     private static let workerBaseURL = "https://your-worker-name.your-subdomain.workers.dev"
 
-    private lazy var claudeAPI: ClaudeAPI = {
-        return ClaudeAPI(proxyURL: "\(Self.workerBaseURL)/chat", model: selectedModel)
+    private lazy var geminiAPI: GeminiAPI = {
+        return GeminiAPI(proxyURL: "\(Self.workerBaseURL)/chat", model: selectedModel)
     }()
 
     private lazy var kokoroTTSClient: KokoroTTSClient = {
@@ -106,13 +106,25 @@ final class CompanionManager: ObservableObject {
     /// Used by the panel to show accurate status text ("Active" vs "Ready").
     @Published private(set) var isOverlayVisible: Bool = false
 
-    /// The Claude model used for voice responses. Persisted to UserDefaults.
-    @Published var selectedModel: String = UserDefaults.standard.string(forKey: "selectedClaudeModel") ?? "claude-sonnet-4-6"
+    /// Default Gemini model used for voice responses. gemini-2.5-flash is the
+    /// stable, free-tier, vision-capable model with native spatial grounding.
+    static let defaultGeminiModel = "gemini-2.5-flash"
+
+    /// The Gemini model used for voice responses. Persisted to UserDefaults.
+    /// Any previously-persisted Claude model id (from before the open-source
+    /// migration) is migrated to the Gemini default so the picker stays valid.
+    @Published var selectedModel: String = {
+        let persistedModel = UserDefaults.standard.string(forKey: "selectedClaudeModel")
+        if let persistedModel, !persistedModel.hasPrefix("claude-") {
+            return persistedModel
+        }
+        return CompanionManager.defaultGeminiModel
+    }()
 
     func setSelectedModel(_ model: String) {
         selectedModel = model
         UserDefaults.standard.set(model, forKey: "selectedClaudeModel")
-        claudeAPI.model = model
+        geminiAPI.model = model
     }
 
     /// User preference for whether the Clicky cursor should be shown.
@@ -176,9 +188,9 @@ final class CompanionManager: ObservableObject {
         bindVoiceStateObservation()
         bindAudioPowerLevel()
         bindShortcutTransitions()
-        // Eagerly touch the Claude API so its TLS warmup handshake completes
+        // Eagerly touch the Gemini API so its TLS warmup handshake completes
         // well before the onboarding demo fires at ~40s into the video.
-        _ = claudeAPI
+        _ = geminiAPI
 
         // If the user already completed onboarding AND all permissions are
         // still granted, show the cursor overlay immediately. If permissions
@@ -560,17 +572,17 @@ final class CompanionManager: ObservableObject {
 
     don't point at things when it would be pointless — like if the user asks a general knowledge question, or the conversation has nothing to do with what's on screen, or you'd just be pointing at something obvious they're already looking at. but if there's a specific UI element, menu, button, or area on screen that's relevant to what you're helping with, point at it.
 
-    when you point, append a coordinate tag at the very end of your response, AFTER your spoken text. the screenshot images are labeled with their pixel dimensions. use those dimensions as the coordinate space. the origin (0,0) is the top-left corner of the image. x increases rightward, y increases downward.
+    when you point, append a coordinate tag at the very end of your response, AFTER your spoken text. the origin (0,0) is the top-left corner of the image. the coordinates are normalized to the range 0-1000 (NOT pixels): 0 is the top/left edge and 1000 is the bottom/right edge of the image.
 
-    format: [POINT:x,y:label] where x,y are integer pixel coordinates in the screenshot's coordinate space, and label is a short 1-3 word description of the element (like "search bar" or "save button"). if the element is on the cursor's screen you can omit the screen number. if the element is on a DIFFERENT screen, append :screenN where N is the screen number from the image label (e.g. :screen2). this is important — without the screen number, the cursor will point at the wrong place.
+    format: [POINT:y,x:label] where y and x are integers from 0 to 1000 in [y, x] order (y first = vertical position / row, x second = horizontal position / column), normalized to 0-1000, and label is a short 1-3 word description of the element (like "search bar" or "save button"). if the element is on the cursor's screen you can omit the screen number. if the element is on a DIFFERENT screen, append :screenN where N is the screen number from the image label (e.g. :screen2). this is important — without the screen number, the cursor will point at the wrong place.
 
     if pointing wouldn't help, append [POINT:none].
 
-    examples:
-    - user asks how to color grade in final cut: "you'll want to open the color inspector — it's right up in the top right area of the toolbar. click that and you'll get all the color wheels and curves. [POINT:1100,42:color inspector]"
+    examples (coordinates are [y,x] normalized to 0-1000):
+    - user asks how to color grade in final cut: "you'll want to open the color inspector — it's right up in the top right area of the toolbar. click that and you'll get all the color wheels and curves. [POINT:55,920:color inspector]"
     - user asks what html is: "html stands for hypertext markup language, it's basically the skeleton of every web page. curious how it connects to the css you're looking at? [POINT:none]"
-    - user asks how to commit in xcode: "see that source control menu up top? click that and hit commit, or you can use command option c as a shortcut. [POINT:285,11:source control]"
-    - element is on screen 2 (not where cursor is): "that's over on your other monitor — see the terminal window? [POINT:400,300:terminal:screen2]"
+    - user asks how to commit in xcode: "see that source control menu up top? click that and hit commit, or you can use command option c as a shortcut. [POINT:15,190:source control]"
+    - element is on screen 2 (not where cursor is): "that's over on your other monitor — see the terminal window? [POINT:380,265:terminal:screen2]"
     """
 
     // MARK: - AI Response Pipeline
@@ -595,12 +607,12 @@ final class CompanionManager: ObservableObject {
 
                 guard !Task.isCancelled else { return }
 
-                // Build image labels with the actual screenshot pixel dimensions
-                // so Claude's coordinate space matches the image it sees. We
-                // scale from screenshot pixels to display points ourselves.
+                // Label each image with its screen identity. Gemini returns
+                // normalized 0-1000 coordinates, so it does not need pixel
+                // dimensions; we convert normalized -> pixels -> display points
+                // ourselves once the response comes back.
                 let labeledImages = screenCaptures.map { capture in
-                    let dimensionInfo = " (image dimensions: \(capture.screenshotWidthInPixels)x\(capture.screenshotHeightInPixels) pixels)"
-                    return (data: capture.imageData, label: capture.label + dimensionInfo)
+                    (data: capture.imageData, label: capture.label)
                 }
 
                 // Pass conversation history so Claude remembers prior exchanges
@@ -608,7 +620,7 @@ final class CompanionManager: ObservableObject {
                     (userPlaceholder: entry.userTranscript, assistantResponse: entry.assistantResponse)
                 }
 
-                let (fullResponseText, _) = try await claudeAPI.analyzeImageStreaming(
+                let (fullResponseText, _) = try await geminiAPI.analyzeImageStreaming(
                     images: labeledImages,
                     systemPrompt: Self.companionVoiceResponseSystemPrompt,
                     conversationHistory: historyForAPI,
@@ -643,11 +655,18 @@ final class CompanionManager: ObservableObject {
                     return screenCaptures.first(where: { $0.isCursorScreen })
                 }()
 
-                if let pointCoordinate = parseResult.coordinate,
+                if let rawPointCoordinate = parseResult.coordinate,
                    let targetScreenCapture {
-                    // Claude's coordinates are in the screenshot's pixel space
-                    // (top-left origin, e.g. 1280x831). Scale to the display's
-                    // point space (e.g. 1512x982), then convert to AppKit global coords.
+                    // Gemini returns normalized [y,x] 0-1000 coordinates; convert
+                    // them to the screenshot's pixel space (top-left origin) first.
+                    let pointCoordinate = Self.screenshotPixelCoordinate(
+                        fromNormalizedPointTag: rawPointCoordinate,
+                        screenshotWidthInPixels: targetScreenCapture.screenshotWidthInPixels,
+                        screenshotHeightInPixels: targetScreenCapture.screenshotHeightInPixels
+                    )
+                    // Now scale from screenshot pixels (e.g. 1280x831) to the
+                    // display's point space (e.g. 1512x982), then convert to
+                    // AppKit global coords.
                     let screenshotWidth = CGFloat(targetScreenCapture.screenshotWidthInPixels)
                     let screenshotHeight = CGFloat(targetScreenCapture.screenshotHeightInPixels)
                     let displayWidth = CGFloat(targetScreenCapture.displayWidthInPoints)
@@ -820,6 +839,32 @@ final class CompanionManager: ObservableObject {
         )
     }
 
+    /// Converts a raw parsed [POINT:y,x] tag value into screenshot-pixel
+    /// coordinates for the given image dimensions.
+    ///
+    /// Gemini emits point coordinates in its native convention: order is
+    /// [y, x] (vertical first), normalized to the integer range 0-1000 with a
+    /// top-left origin. Our [POINT:...] tag now carries those values verbatim,
+    /// so the parsed `coordinate.x` actually holds the normalized Y (row) and
+    /// `coordinate.y` holds the normalized X (column). This helper performs the
+    /// single, well-defined swap + scale into the screenshot's pixel space
+    /// (top-left origin), which is exactly what the downstream display/AppKit
+    /// mapping already expects. Keeping this conversion isolated means that if
+    /// Xcode-side accuracy testing ever shows a transpose, it is a one-line fix.
+    static func screenshotPixelCoordinate(
+        fromNormalizedPointTag rawParsedCoordinate: CGPoint,
+        screenshotWidthInPixels: Int,
+        screenshotHeightInPixels: Int
+    ) -> CGPoint {
+        let normalizedY = rawParsedCoordinate.x // first tag value = y (row)
+        let normalizedX = rawParsedCoordinate.y // second tag value = x (column)
+
+        let pixelX = normalizedX / 1000.0 * CGFloat(screenshotWidthInPixels)
+        let pixelY = normalizedY / 1000.0 * CGFloat(screenshotHeightInPixels)
+
+        return CGPoint(x: pixelX, y: pixelY)
+    }
+
     // MARK: - Onboarding Video
 
     /// Sets up the onboarding video player, starts playback, and schedules
@@ -950,13 +995,11 @@ final class CompanionManager: ObservableObject {
 
     make a short quirky 3-6 word observation about the specific thing you picked — something fun, playful, or curious that shows you actually read/recognized it. no emojis ever. NEVER quote or repeat text you see on screen — just react to it. keep it to 6 words max, no exceptions.
 
-    CRITICAL COORDINATE RULE: you MUST only pick elements near the CENTER of the screen. your x coordinate must be between 20%-80% of the image width. your y coordinate must be between 20%-80% of the image height. do NOT pick anything in the top 20%, bottom 20%, left 20%, or right 20% of the screen. no menu bar items, no dock icons, no sidebar items, no items near any edge. only things clearly in the middle area of the screen. if the only interesting things are near the edges, pick something boring in the center instead.
+    CRITICAL COORDINATE RULE: you MUST only pick elements near the CENTER of the screen. since coordinates are normalized to 0-1000, both your x and y must be between 200 and 800. do NOT pick anything in the top, bottom, left, or right 20% (i.e. below 200 or above 800 on either axis). no menu bar items, no dock icons, no sidebar items, no items near any edge. only things clearly in the middle area of the screen. if the only interesting things are near the edges, pick something boring in the center instead.
 
     respond with ONLY your short comment followed by the coordinate tag. nothing else. all lowercase.
 
-    format: your comment [POINT:x,y:label]
-
-    the screenshot images are labeled with their pixel dimensions. use those dimensions as the coordinate space. origin (0,0) is top-left. x increases rightward, y increases downward.
+    format: your comment [POINT:y,x:label] where y and x are integers from 0 to 1000 in [y, x] order (y first = vertical, x second = horizontal), normalized to 0-1000. origin (0,0) is top-left.
     """
 
     /// Captures a screenshot and asks Claude to find something interesting to
@@ -977,10 +1020,10 @@ final class CompanionManager: ObservableObject {
                     return
                 }
 
-                let dimensionInfo = " (image dimensions: \(cursorScreenCapture.screenshotWidthInPixels)x\(cursorScreenCapture.screenshotHeightInPixels) pixels)"
-                let labeledImages = [(data: cursorScreenCapture.imageData, label: cursorScreenCapture.label + dimensionInfo)]
+                // Normalized 0-1000 coordinates need no pixel dimensions in the label.
+                let labeledImages = [(data: cursorScreenCapture.imageData, label: cursorScreenCapture.label)]
 
-                let (fullResponseText, _) = try await claudeAPI.analyzeImageStreaming(
+                let (fullResponseText, _) = try await geminiAPI.analyzeImageStreaming(
                     images: labeledImages,
                     systemPrompt: Self.onboardingDemoSystemPrompt,
                     userPrompt: "look around my screen and find something interesting to point at",
@@ -989,10 +1032,18 @@ final class CompanionManager: ObservableObject {
 
                 let parseResult = Self.parsePointingCoordinates(from: fullResponseText)
 
-                guard let pointCoordinate = parseResult.coordinate else {
+                guard let rawPointCoordinate = parseResult.coordinate else {
                     print("🎯 Onboarding demo: no element to point at")
                     return
                 }
+
+                // Gemini returns normalized [y,x] 0-1000 coordinates; convert to
+                // screenshot pixel space before the display/AppKit mapping.
+                let pointCoordinate = Self.screenshotPixelCoordinate(
+                    fromNormalizedPointTag: rawPointCoordinate,
+                    screenshotWidthInPixels: cursorScreenCapture.screenshotWidthInPixels,
+                    screenshotHeightInPixels: cursorScreenCapture.screenshotHeightInPixels
+                )
 
                 let screenshotWidth = CGFloat(cursorScreenCapture.screenshotWidthInPixels)
                 let screenshotHeight = CGFloat(cursorScreenCapture.screenshotHeightInPixels)

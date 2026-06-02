@@ -1,20 +1,34 @@
 /**
- * Clicky Proxy Worker
+ * ClickyJ Proxy Worker
  *
- * Proxies requests to Claude and ElevenLabs APIs so the app never
- * ships with raw API keys. Keys are stored as Cloudflare secrets.
+ * Proxies vision + streaming chat requests to the Google Gemini API so the
+ * app never ships with a raw API key. The key is stored as a Cloudflare
+ * secret. This is the only remaining proxy route in ClickyJ — speech-to-text
+ * (WhisperKit) and text-to-speech (Kokoro) now run locally on the user's Mac,
+ * so the former /tts and /transcribe-token routes have been removed.
  *
- * Routes:
- *   POST /chat  → Anthropic Messages API (streaming)
- *   POST /tts   → ElevenLabs TTS API
+ * Route:
+ *   POST /chat  → Gemini generateContent (streaming via SSE by default)
+ *
+ * The Swift client (GeminiAPI.swift) already sends a Gemini-shaped JSON body
+ * (systemInstruction, contents, generationConfig). The Worker simply selects
+ * the upstream model + endpoint, injects the key header, and forwards the
+ * response (SSE body streamed straight through).
  */
 
 interface Env {
-  ANTHROPIC_API_KEY: string;
-  ELEVENLABS_API_KEY: string;
-  ELEVENLABS_VOICE_ID: string;
-  ASSEMBLYAI_API_KEY: string;
+  GEMINI_API_KEY: string;
 }
+
+const GEMINI_API_BASE = "https://generativelanguage.googleapis.com/v1beta/models";
+
+// Allowlist of models the app may request, so a malformed/hostile header can't
+// point the proxy at an arbitrary upstream path. Falls back to the default.
+const ALLOWED_MODELS = new Set([
+  "gemini-2.5-flash",
+  "gemini-2.5-flash-lite",
+]);
+const DEFAULT_MODEL = "gemini-2.5-flash";
 
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
@@ -27,14 +41,6 @@ export default {
     try {
       if (url.pathname === "/chat") {
         return await handleChat(request, env);
-      }
-
-      if (url.pathname === "/tts") {
-        return await handleTTS(request, env);
-      }
-
-      if (url.pathname === "/transcribe-token") {
-        return await handleTranscribeToken(env);
       }
     } catch (error) {
       console.error(`[${url.pathname}] Unhandled error:`, error);
@@ -51,91 +57,48 @@ export default {
 async function handleChat(request: Request, env: Env): Promise<Response> {
   const body = await request.text();
 
-  const response = await fetch("https://api.anthropic.com/v1/messages", {
+  // The app picks the model via the X-Clicky-Model header (set by GeminiAPI).
+  const requestedModel = request.headers.get("X-Clicky-Model") ?? DEFAULT_MODEL;
+  const model = ALLOWED_MODELS.has(requestedModel) ? requestedModel : DEFAULT_MODEL;
+
+  // Streaming is the default. The app sets X-Clicky-Stream:false for the
+  // non-streaming validation path (analyzeImage).
+  const useStreaming = request.headers.get("X-Clicky-Stream") !== "false";
+  const endpoint = useStreaming
+    ? `${GEMINI_API_BASE}/${model}:streamGenerateContent?alt=sse`
+    : `${GEMINI_API_BASE}/${model}:generateContent`;
+
+  const upstreamResponse = await fetch(endpoint, {
     method: "POST",
     headers: {
-      "x-api-key": env.ANTHROPIC_API_KEY,
-      "anthropic-version": "2023-06-01",
+      // Current/preferred auth method — keeps the key out of the URL.
+      "x-goog-api-key": env.GEMINI_API_KEY,
       "content-type": "application/json",
     },
     body,
   });
 
-  if (!response.ok) {
-    const errorBody = await response.text();
-    console.error(`[/chat] Anthropic API error ${response.status}: ${errorBody}`);
+  if (!upstreamResponse.ok) {
+    const errorBody = await upstreamResponse.text();
+    console.error(`[/chat] Gemini API error ${upstreamResponse.status}: ${errorBody}`);
     return new Response(errorBody, {
-      status: response.status,
+      status: upstreamResponse.status,
       headers: { "content-type": "application/json" },
     });
   }
 
-  return new Response(response.body, {
-    status: response.status,
+  // Forward the body straight through. For streaming this is an SSE stream of
+  // "data: {json}\n\n" lines that the Swift client reads incrementally; for the
+  // non-streaming path it's a single JSON object.
+  const contentType = useStreaming
+    ? upstreamResponse.headers.get("content-type") || "text/event-stream"
+    : upstreamResponse.headers.get("content-type") || "application/json";
+
+  return new Response(upstreamResponse.body, {
+    status: upstreamResponse.status,
     headers: {
-      "content-type": response.headers.get("content-type") || "text/event-stream",
+      "content-type": contentType,
       "cache-control": "no-cache",
-    },
-  });
-}
-
-async function handleTranscribeToken(env: Env): Promise<Response> {
-  const response = await fetch(
-    "https://streaming.assemblyai.com/v3/token?expires_in_seconds=480",
-    {
-      method: "GET",
-      headers: {
-        authorization: env.ASSEMBLYAI_API_KEY,
-      },
-    }
-  );
-
-  if (!response.ok) {
-    const errorBody = await response.text();
-    console.error(`[/transcribe-token] AssemblyAI token error ${response.status}: ${errorBody}`);
-    return new Response(errorBody, {
-      status: response.status,
-      headers: { "content-type": "application/json" },
-    });
-  }
-
-  const data = await response.text();
-  return new Response(data, {
-    status: 200,
-    headers: { "content-type": "application/json" },
-  });
-}
-
-async function handleTTS(request: Request, env: Env): Promise<Response> {
-  const body = await request.text();
-  const voiceId = env.ELEVENLABS_VOICE_ID;
-
-  const response = await fetch(
-    `https://api.elevenlabs.io/v1/text-to-speech/${voiceId}`,
-    {
-      method: "POST",
-      headers: {
-        "xi-api-key": env.ELEVENLABS_API_KEY,
-        "content-type": "application/json",
-        accept: "audio/mpeg",
-      },
-      body,
-    }
-  );
-
-  if (!response.ok) {
-    const errorBody = await response.text();
-    console.error(`[/tts] ElevenLabs API error ${response.status}: ${errorBody}`);
-    return new Response(errorBody, {
-      status: response.status,
-      headers: { "content-type": "application/json" },
-    });
-  }
-
-  return new Response(response.body, {
-    status: response.status,
-    headers: {
-      "content-type": response.headers.get("content-type") || "audio/mpeg",
     },
   });
 }
