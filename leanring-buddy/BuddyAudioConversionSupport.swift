@@ -69,6 +69,83 @@ final class BuddyPCM16AudioConverter {
     }
 }
 
+/// Converts incoming microphone `AVAudioPCMBuffer`s into 16 kHz mono Float32
+/// samples, the format WhisperKit's `transcribe(audioArray:)` API requires.
+///
+/// Mic buffers are typically 44.1 or 48 kHz; passing them to WhisperKit without
+/// resampling to 16 kHz produces garbage or empty transcripts. This converter
+/// caches a single `AVAudioConverter` and re-creates it only when the input
+/// format actually changes, mirroring `BuddyPCM16AudioConverter`.
+final class BuddyFloat32AudioConverter {
+    /// WhisperKit operates at a fixed 16 kHz sample rate.
+    static let whisperKitSampleRate: Double = 16_000
+
+    private let targetAudioFormat: AVAudioFormat
+    private var audioConverter: AVAudioConverter?
+    private var currentInputFormatDescription: String?
+
+    init(targetSampleRate: Double = BuddyFloat32AudioConverter.whisperKitSampleRate) {
+        // Non-interleaved Float32 mono — what WhisperKit expects as [Float].
+        self.targetAudioFormat = AVAudioFormat(
+            commonFormat: .pcmFormatFloat32,
+            sampleRate: targetSampleRate,
+            channels: 1,
+            interleaved: false
+        )!
+    }
+
+    /// Converts and resamples `audioBuffer` to 16 kHz mono, returning the raw
+    /// Float samples. Returns nil if conversion fails or yields no frames.
+    func convertToFloatSamples(from audioBuffer: AVAudioPCMBuffer) -> [Float]? {
+        let inputFormatDescription = audioBuffer.format.settings.description
+
+        if currentInputFormatDescription != inputFormatDescription {
+            audioConverter = AVAudioConverter(from: audioBuffer.format, to: targetAudioFormat)
+            currentInputFormatDescription = inputFormatDescription
+        }
+
+        guard let audioConverter else { return nil }
+
+        let sampleRateRatio = targetAudioFormat.sampleRate / audioBuffer.format.sampleRate
+        let outputFrameCapacity = AVAudioFrameCount(
+            (Double(audioBuffer.frameLength) * sampleRateRatio).rounded(.up) + 32
+        )
+
+        guard let outputBuffer = AVAudioPCMBuffer(
+            pcmFormat: targetAudioFormat,
+            frameCapacity: outputFrameCapacity
+        ) else {
+            return nil
+        }
+
+        var hasProvidedSourceBuffer = false
+        var conversionError: NSError?
+
+        let conversionStatus = audioConverter.convert(to: outputBuffer, error: &conversionError) { _, outStatus in
+            if hasProvidedSourceBuffer {
+                outStatus.pointee = .noDataNow
+                return nil
+            }
+
+            hasProvidedSourceBuffer = true
+            outStatus.pointee = .haveData
+            return audioBuffer
+        }
+
+        guard conversionStatus != .error else { return nil }
+
+        let convertedFrameCount = Int(outputBuffer.frameLength)
+        guard convertedFrameCount > 0,
+              let floatChannelData = outputBuffer.floatChannelData else {
+            return nil
+        }
+
+        // channel 0 — mono output
+        let firstChannelSamples = floatChannelData[0]
+        return Array(UnsafeBufferPointer(start: firstChannelSamples, count: convertedFrameCount))
+    }
+}
+
 enum BuddyWAVFileBuilder {
     static func buildWAVData(
         fromPCM16MonoAudio pcm16AudioData: Data,
