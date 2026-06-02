@@ -1,0 +1,8 @@
+# Python virtualenv
+.venv/
+__pycache__/
+*.pyc
+
+# Kokoro model files — downloaded on demand via setup_and_run.sh, not committed
+*.onnx
+voices-*.bin
