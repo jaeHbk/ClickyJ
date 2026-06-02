@@ -4,7 +4,7 @@ ClickyJ is an open-source restart of [Clicky](https://github.com/farzaa/clicky) 
 
 ![Clicky — an ai buddy that lives on your mac](clicky-demo.gif)
 
-## What makes ClickyJ different
+## Why ClickyJ 
 
 The goal of this fork is simple: **replace every paid API with an open-source or free-hosted equivalent, without losing features or performance.** Speech and voice now run fully on your Mac; only the vision/chat call leaves the device, and it uses a free tier.
 
@@ -60,7 +60,7 @@ open leanring-buddy.xcodeproj
 
 Grant the permissions it requests: **Microphone**, **Accessibility** (global hotkey), **Screen Recording**, and **Screen Content**.
 
-## Architecture (short version)
+## Architecture
 
 Menu-bar app (no dock icon) with two `NSPanel`s — the control-panel dropdown and a full-screen transparent cursor overlay. Push-to-talk captures audio, **WhisperKit** transcribes it on-device, the transcript + a screenshot go to **Gemini** over streaming SSE (via the Worker), and the reply is spoken by the local **Kokoro** sidecar. Gemini embeds `[POINT:y,x:label:screenN]` tags (normalized 0–1000) that the cursor flies to across monitors. Full breakdown in `CLAUDE.md` / `AGENTS.md`.
 
