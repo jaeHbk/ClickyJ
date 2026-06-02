@@ -15,7 +15,7 @@ equivalents without significantly degrading features or performance.
 |---|---|---|---|---|
 | Restart | repo reset | clean import of `farzaa/clicky@a80fa80` | ✅ done (pushed) | n/a |
 | Docs | spec/plan/progress | written | ✅ done | n/a |
-| A | Analytics | strip PostHog | ⬜ not started | ⏳ XCODE |
+| A | Analytics | strip PostHog | ✅ code done (merged `main`) | ⏳ XCODE |
 | B | Speech-to-text | WhisperKit | ⬜ not started | ⏳ XCODE |
 | C | Text-to-speech | Kokoro sidecar | ⬜ not started | ⏳ XCODE |
 | D | Vision + `[POINT]` | Gemini 2.x Flash | ⬜ not started | ⏳ XCODE |
@@ -61,10 +61,18 @@ equivalents without significantly degrading features or performance.
 > Each entry records what we gained, what we gave up, and the measured delta.
 > Empty until the corresponding swap is implemented + Xcode-validated.
 
-### A — Analytics (PostHog → none)
-- **Gained:** no telemetry/phone-home; one fewer SaaS + SPM dependency; no embedded key.
-- **Gave up:** usage insight.
-- **Perf/size delta:** _TBD (binary size after removing posthog-ios)._
+### A — Analytics (PostHog → none) ✅ code complete 2026-06-01
+- **Gained:** no telemetry/phone-home; removed the `posthog-ios` SPM dep **and** its
+  transitive `plcrashreporter` pin; deleted the embedded PostHog project key.
+- **Gave up:** usage insight (acceptable — telemetry is not a user feature).
+- **How:** `ClickyAnalytics` kept as a no-op enum with the **identical public API**
+  (all `track*` methods + new no-op `identifyUser`), so all 18 call sites compile
+  unchanged. Direct `PostHogSDK.identify` in `submitEmail` routed through the shim;
+  FormSpark email capture preserved. Removed `import PostHog` from `CompanionManager`.
+  pbxproj: all 5 PostHog GUID refs removed, Sparkle's 7 refs intact, braces balanced.
+- **Perf/size delta:** binary should shrink (PostHog + plcrashreporter gone) — _measure on Xcode machine._
+- **Xcode validation:** ⏳ build w/o posthog-ios; launch; confirm no analytics network
+  calls; confirm no crash on former call sites (esp. `submitEmail`).
 
 ### B — STT (AssemblyAI/OpenAI → WhisperKit)
 - **Gained:** $0, fully offline, no key, privacy.
