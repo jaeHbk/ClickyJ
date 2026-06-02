@@ -17,7 +17,7 @@ equivalents without significantly degrading features or performance.
 | Docs | spec/plan/progress | written | ✅ done | n/a |
 | A | Analytics | strip PostHog | ✅ code done (merged `main`) | ⏳ XCODE |
 | B | Speech-to-text | WhisperKit | ⬜ not started | ⏳ XCODE |
-| C | Text-to-speech | Kokoro sidecar | ⬜ not started | ⏳ XCODE |
+| C | Text-to-speech | Kokoro sidecar | ✅ code done (merged `main`) | ⏳ XCODE |
 | D | Vision + `[POINT]` | Gemini 2.x Flash | ⬜ not started | ⏳ XCODE |
 
 ---
@@ -79,10 +79,22 @@ equivalents without significantly degrading features or performance.
 - **Gave up:** _TBD (streaming partials may differ from AssemblyAI turn model)._
 - **Measured:** _TBD latency (ms to partial / final), accuracy notes, model size._
 
-### C — TTS (ElevenLabs → Kokoro)
-- **Gained:** $0, offline, no key.
-- **Gave up:** _TBD (voice naturalness vs ElevenLabs; requires sidecar install)._
-- **Measured:** _TBD time-to-first-audio, voice quality notes._
+### C — TTS (ElevenLabs → Kokoro) ✅ code complete 2026-06-01
+- **Gained:** $0, fully offline, no key, no per-character cost. Kokoro-82M is
+  Apache-2.0; kokoro-onnx is MIT. WAV PCM16/24kHz round-trip verified locally.
+- **Gave up:** voice naturalness likely a notch below ElevenLabs; needs a local
+  Python sidecar running (mitigated by AVSpeechSynthesizer auto-fallback so the
+  app is never mute even before install). ~88MB int8 model downloaded on demand.
+- **How:** `KokoroTTSClient` is a drop-in for `ElevenLabsTTSClient` (identical
+  `speakText`/`isPlaying`/`stopPlayback`). Sidecar = stdlib `http.server`, model
+  loaded once, inference lock, 127.0.0.1-only, `/health` probe. ElevenLabs client
+  deleted; CompanionManager rewired.
+- **Design choice:** translation/format kept simple — sidecar returns WAV so no
+  Swift-side audio decoding is needed. Default voice `af_heart` (grade-A).
+- **Xcode validation:** ⏳ run `tts-sidecar/setup_and_run.sh`; confirm spoken
+  response plays + `stopPlayback` interrupts; kill sidecar → confirm AVSpeech
+  fallback speaks; record time-to-first-audio vs ElevenLabs + voice-quality note.
+- **Open item:** worker `/tts` route removal happens with Swap D integration pass.
 
 ### D — Vision (Claude → Gemini)
 - **Gained:** free tier vs paid Anthropic; still cloud-quality VLM.
