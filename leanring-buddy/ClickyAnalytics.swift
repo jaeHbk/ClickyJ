@@ -2,120 +2,80 @@
 //  ClickyAnalytics.swift
 //  leanring-buddy
 //
-//  Centralized PostHog analytics wrapper. All event names and properties
-//  are defined here so instrumentation is consistent and easy to audit.
+//  Analytics is intentionally a no-op in ClickyJ.
+//
+//  The upstream Clicky app sent usage telemetry to PostHog (a paid SaaS).
+//  ClickyJ is a privacy-respecting open-source restart, so all analytics
+//  have been stripped. This enum keeps the exact same public API surface
+//  as the original so every call site across the app compiles and runs
+//  unchanged — each method simply does nothing.
+//
+//  If you ever want telemetry back, this is the single place to wire it in.
 //
 
 import Foundation
-import PostHog
 
 enum ClickyAnalytics {
 
     // MARK: - Setup
 
-    static func configure() {
-        let config = PostHogConfig(
-            apiKey: "phc_xcQPygmhTMzzYh8wNW92CCwoXmnzqyChAixh8zgpqC3C",
-            host: "https://us.i.posthog.com"
-        )
-        PostHogSDK.shared.setup(config)
-    }
+    /// No-op. Previously configured the PostHog SDK.
+    static func configure() {}
+
+    // MARK: - Identity
+
+    /// No-op. Previously identified the user in PostHog by email.
+    static func identifyUser(email: String) {}
 
     // MARK: - App Lifecycle
 
-    /// Fired once on every app launch in applicationDidFinishLaunching.
-    static func trackAppOpened() {
-        let version = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "unknown"
-        PostHogSDK.shared.capture("app_opened", properties: [
-            "app_version": version
-        ])
-    }
+    /// No-op. Previously fired once on every app launch.
+    static func trackAppOpened() {}
 
     // MARK: - Onboarding
 
-    /// User clicked the Start button to begin onboarding for the first time.
-    static func trackOnboardingStarted() {
-        PostHogSDK.shared.capture("onboarding_started")
-    }
+    /// No-op. User clicked Start to begin onboarding for the first time.
+    static func trackOnboardingStarted() {}
 
-    /// User clicked "Watch Onboarding Again" from the panel footer.
-    static func trackOnboardingReplayed() {
-        PostHogSDK.shared.capture("onboarding_replayed")
-    }
+    /// No-op. User clicked "Watch Onboarding Again" from the panel footer.
+    static func trackOnboardingReplayed() {}
 
-    /// The onboarding video finished playing to the end.
-    static func trackOnboardingVideoCompleted() {
-        PostHogSDK.shared.capture("onboarding_video_completed")
-    }
+    /// No-op. The onboarding video finished playing to the end.
+    static func trackOnboardingVideoCompleted() {}
 
-    /// The 40s onboarding demo interaction where Clicky points at something.
-    static func trackOnboardingDemoTriggered() {
-        PostHogSDK.shared.capture("onboarding_demo_triggered")
-    }
+    /// No-op. The 40s onboarding demo interaction where Clicky points at something.
+    static func trackOnboardingDemoTriggered() {}
 
     // MARK: - Permissions
 
-    /// All three permissions (accessibility, screen recording, mic) are granted.
-    static func trackAllPermissionsGranted() {
-        PostHogSDK.shared.capture("all_permissions_granted")
-    }
+    /// No-op. All three permissions (accessibility, screen recording, mic) granted.
+    static func trackAllPermissionsGranted() {}
 
-    /// A single permission was granted. Called when polling detects a change.
-    static func trackPermissionGranted(permission: String) {
-        PostHogSDK.shared.capture("permission_granted", properties: [
-            "permission": permission
-        ])
-    }
+    /// No-op. A single permission was granted.
+    static func trackPermissionGranted(permission: String) {}
 
     // MARK: - Voice Interaction
 
-    /// User pressed the push-to-talk shortcut (control+option) to start talking.
-    static func trackPushToTalkStarted() {
-        PostHogSDK.shared.capture("push_to_talk_started")
-    }
+    /// No-op. User pressed the push-to-talk shortcut to start talking.
+    static func trackPushToTalkStarted() {}
 
-    /// User released the shortcut — transcript is being finalized.
-    static func trackPushToTalkReleased() {
-        PostHogSDK.shared.capture("push_to_talk_released")
-    }
+    /// No-op. User released the shortcut — transcript is being finalized.
+    static func trackPushToTalkReleased() {}
 
-    /// Transcription completed and the user's message is being sent to the AI.
-    static func trackUserMessageSent(transcript: String) {
-        PostHogSDK.shared.capture("user_message_sent", properties: [
-            "transcript": transcript,
-            "character_count": transcript.count
-        ])
-    }
+    /// No-op. Transcription completed and the user's message is being sent to the AI.
+    static func trackUserMessageSent(transcript: String) {}
 
-    /// Claude responded and the response is being spoken via TTS.
-    static func trackAIResponseReceived(response: String) {
-        PostHogSDK.shared.capture("ai_response_received", properties: [
-            "response": response,
-            "character_count": response.count
-        ])
-    }
+    /// No-op. The AI responded and the response is being spoken via TTS.
+    static func trackAIResponseReceived(response: String) {}
 
-    /// Claude's response included a [POINT:x,y:label] coordinate tag,
-    /// so the buddy is flying to point at a UI element.
-    static func trackElementPointed(elementLabel: String?) {
-        PostHogSDK.shared.capture("element_pointed", properties: [
-            "element_label": elementLabel ?? "unknown"
-        ])
-    }
+    /// No-op. The AI response included a [POINT:x,y:label] coordinate tag.
+    static func trackElementPointed(elementLabel: String?) {}
 
     // MARK: - Errors
 
-    /// An error occurred during the AI response pipeline.
-    static func trackResponseError(error: String) {
-        PostHogSDK.shared.capture("response_error", properties: [
-            "error": error
-        ])
-    }
+    /// No-op. An error occurred during the AI response pipeline.
+    static func trackResponseError(error: String) {}
 
-    /// An error occurred during TTS playback.
-    static func trackTTSError(error: String) {
-        PostHogSDK.shared.capture("tts_error", properties: [
-            "error": error
-        ])
-    }
+    /// No-op. An error occurred during TTS playback.
+    static func trackTTSError(error: String) {}
 }
