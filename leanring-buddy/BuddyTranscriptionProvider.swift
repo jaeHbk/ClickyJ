@@ -31,8 +31,7 @@ protocol BuddyTranscriptionProvider {
 
 enum BuddyTranscriptionProviderFactory {
     private enum PreferredProvider: String {
-        case assemblyAI = "assemblyai"
-        case openAI = "openai"
+        case whisperKit = "whisperkit"
         case appleSpeech = "apple"
     }
 
@@ -48,53 +47,22 @@ enum BuddyTranscriptionProviderFactory {
             .lowercased()
         let preferredProvider = preferredProviderRawValue.flatMap(PreferredProvider.init(rawValue:))
 
-        let assemblyAIProvider = AssemblyAIStreamingTranscriptionProvider()
-        let openAIProvider = OpenAIAudioTranscriptionProvider()
-
+        // Apple Speech is the fully-local fallback if WhisperKit is explicitly
+        // disabled via Info.plist.
         if preferredProvider == .appleSpeech {
             return AppleSpeechTranscriptionProvider()
         }
 
-        if preferredProvider == .assemblyAI {
-            if assemblyAIProvider.isConfigured {
-                return assemblyAIProvider
-            }
-
-            print("⚠️ Transcription: AssemblyAI preferred but not configured, falling back")
-
-            if openAIProvider.isConfigured {
-                print("⚠️ Transcription: using OpenAI as fallback")
-                return openAIProvider
-            }
-
-            print("⚠️ Transcription: using Apple Speech as fallback")
-            return AppleSpeechTranscriptionProvider()
+        // Default (and explicit "whisperkit"): on-device WhisperKit. It reports
+        // isConfigured == true because the model downloads on first use; if the
+        // model fails to load at session start, the session surfaces the error
+        // and the dictation manager can retry or surface it to the user.
+        let whisperKitProvider = WhisperKitTranscriptionProvider()
+        if whisperKitProvider.isConfigured {
+            return whisperKitProvider
         }
 
-        if preferredProvider == .openAI {
-            if openAIProvider.isConfigured {
-                return openAIProvider
-            }
-
-            print("⚠️ Transcription: OpenAI preferred but not configured, falling back")
-
-            if assemblyAIProvider.isConfigured {
-                print("⚠️ Transcription: using AssemblyAI as fallback")
-                return assemblyAIProvider
-            }
-
-            print("⚠️ Transcription: using Apple Speech as fallback")
-            return AppleSpeechTranscriptionProvider()
-        }
-
-        if assemblyAIProvider.isConfigured {
-            return assemblyAIProvider
-        }
-
-        if openAIProvider.isConfigured {
-            return openAIProvider
-        }
-
+        print("⚠️ Transcription: WhisperKit unavailable, falling back to Apple Speech")
         return AppleSpeechTranscriptionProvider()
     }
 }
